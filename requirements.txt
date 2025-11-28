@@ -1,0 +1,14 @@
+# UHI Dashboard Requirements
+# Install with: pip install -r requirements.txt
+
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.15.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+requests>=2.31.0
+fpdf>=1.7.2
+
+# Optional - for Bayesian Optimization
+bayesian-optimization>=1.4.0
