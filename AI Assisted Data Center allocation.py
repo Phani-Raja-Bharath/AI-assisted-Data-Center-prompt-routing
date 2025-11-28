@@ -2988,47 +2988,50 @@ def main():
     )
     st.plotly_chart(fig_map3, use_container_width=True)
     
-    # 6.5 Final Recommendation
+  # 6.5 Final Recommendation
     st.markdown('<div class="subsection-header">6.5 Final Recommendation</div>', unsafe_allow_html=True)
 
     final_rec = generate_final_recommendation(results, latency_threshold)
 
-    # Extract dynamic metrics for clarity
-    imp = final_rec['improvements']
-    uhi_pct = imp['uhi_reduction_pct']
-    cv_pct = imp['cv_reduction_pct']
-    latency_pct = imp['latency_change_pct']  # usually negative if latency improves
-    energy_pct = imp['energy_overhead_pct']
+    imp = final_rec["improvements"]
+    uhi_pct = imp["uhi_reduction_pct"]
+    cv_pct = imp["cv_reduction_pct"]
+    latency_pct = imp["latency_change_pct"]   # negative = latency improves
+    energy_pct = imp["energy_overhead_pct"]
 
-    st.markdown(f"""
-        <div class="success-box">
-            <h4 style="margin: 0 0 0.75rem 0;">
-                🎯 Recommended Strategy: {final_rec['recommended_strategy']}
-            </h4>
+    st.markdown(
+        f"""
+    <div class="success-box">
+    <h4 style="margin: 0 0 0.75rem 0;">
+    🎯 Recommended Strategy: {final_rec['recommended_strategy']}
+    </h4>
 
-            <p style="margin: 0.5rem 0;">
-                <strong>Based on the multi-metric evaluation (Energy, Latency, Carbon, and UHI),
-                the UHI-Aware strategy delivers the strongest overall sustainability
-                performance compared to Energy-Only routing.</strong>
-            </p>
+    <p style="margin: 0.5rem 0;">
+        <strong>Based on the multi-metric evaluation (Energy, Latency, Carbon, and UHI),
+        the UHI-Aware strategy delivers the strongest overall sustainability
+        performance compared to Energy-Only routing.</strong>
+    </p>
 
-            <p style="margin: 0.5rem 0;"><strong>Measured Effects (vs. Energy-Only):</strong></p>
-            <ul style="margin: 0 0 1rem 0;">
-                <li>🌡️ <strong>{uhi_pct:.1f}% reduction in peak UHI</strong></li>
-                <li>🔥 <strong>{cv_pct:.1f}% reduction in heat concentration (CV)</strong></li>
-                <li>⏱️ {(-latency_pct):.1f}% lower latency</li>
-                <li>⚡ ~{energy_pct:.1f}% energy overhead to achieve these gains</li>
-            </ul>
+    <p style="margin: 0.5rem 0;"><strong>Measured Effects (vs. Energy-Only):</strong></p>
+    <ul style="margin: 0 0 1rem 0;">
+        <li>🌡️ <strong>{uhi_pct:.1f}% reduction in peak UHI</strong></li>
+        <li>🔥 <strong>{cv_pct:.1f}% reduction in heat concentration (CV)</strong></li>
+        <li>⏱️ {(-latency_pct):.1f}% lower latency</li>
+        <li>⚡ ~{energy_pct:.1f}% energy overhead to achieve these gains</li>
+    </ul>
 
-            <p style="margin-top: 0.75rem; font-style: italic;">
-                <strong>Interpretation:</strong> A modest energy overhead of about {energy_pct:.1f}% yields
-                a disproportionately large sustainability benefit, reducing localized thermal
-                stress by ~{uhi_pct:.1f}% and smoothing heat distribution by ~{cv_pct:.1f}%, 
-                while slightly improving latency. This trade-off represents a more optimal and
-                resilient routing policy than traditional Energy-Only optimization.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+    <p style="margin-top: 0.75rem; font-style: italic;">
+        <strong>Interpretation:</strong> A modest energy overhead of about {energy_pct:.1f}% yields
+        a disproportionately large sustainability benefit, reducing localized thermal
+        stress by ~{uhi_pct:.1f}% and smoothing heat distribution by ~{cv_pct:.1f}%, 
+        while slightly improving latency. This trade-off represents a more optimal and
+        resilient routing policy than traditional Energy-Only optimization.
+    </p>
+    </div>
+    """,
+        unsafe_allow_html=True,
+    )
+
 
 
     
