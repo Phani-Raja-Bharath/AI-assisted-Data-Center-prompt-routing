@@ -850,7 +850,7 @@ class AIModelSuite:
         self.training_source = "unknown"   # "real" or "synthetic"
         self.training_samples = 0
 
-    def generate_training_data(self, n_samples=500, days=7, use_real_weather=True):
+    def generate_training_data(self, n_samples=5000, days=7, use_real_weather=True):
         """
         Build training dataset.
 
@@ -882,7 +882,7 @@ class AIModelSuite:
 
                         # Ground-truth energy from physics model
                         energy = calculate_energy_per_request(temp, humidity, cooling_str)
-                        energy += np.random.normal(0, 0.01)  # small noise
+                        energy += np.random.normal(0, 0.005)  # small noise
 
                         data.append([temp, humidity, wind, cooling_idx, energy])
 
@@ -2954,7 +2954,7 @@ def main():
     - Energy per Request (Wh)
     
     **Dataset:** Real-time weather samples from all active datacenter locations,
-    with synthetic fallback (500 training samples, 150 test samples (70/30 split)) if live data is unavailable.
+    with synthetic fallback (5000 training samples, 150 test samples (70/30 split)) if live data is unavailable.
     """)
     
     # Train models
