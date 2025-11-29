@@ -1074,16 +1074,15 @@ class AIModelSuite:
 
                     # Optional: track metadata in the suite
                     self.used_real_weather = True
-                    self.training_source = "historical_real"
+                    self.training_source = "real"
                     self.training_samples = len(data)
 
-                    print(f"✅ Training on historical real weather data: {len(data)} samples")
+                    print(f"✅ Training on historical weather data (2021-2024): {len(data)} samples")
                 else:
                     print("⚠️ collect_historical_training_data() returned empty – using synthetic data.")
             except Exception as e:
-                print(f"❌ Real weather training data error: {e}")
+                print(f"❌ Historical weather training data error: {e}")
                 print("   Falling back to synthetic training data.")
-
 
         # --- 2. Fallback: synthetic physics-based data (original behavior) ---
         if not data:
@@ -1099,6 +1098,11 @@ class AIModelSuite:
                 energy += np.random.normal(0, 0.005)
 
                 data.append([temp, humidity, wind, cooling_idx, energy])
+            
+            # Set metadata for synthetic data
+            self.used_real_weather = False
+            self.training_source = "synthetic"
+            self.training_samples = len(data)
             print(f"✅ Training on synthetic physics-based data: {len(data)} samples")
 
         df = pd.DataFrame(
@@ -3218,18 +3222,17 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     **Target (y):**
     - Energy per Request (Wh)
     
-    **Dataset:** Real-time weather samples from all active datacenter locations,
-    with synthetic fallback (5000 training samples & 70/30 split) if live data is unavailable.
+    **Dataset:** Historical weather data (2021-2024) from Open-Meteo for all datacenter locations,
+    with synthetic fallback (5000 training samples & 70/30 split) if historical data is unavailable.
+    
+    **Prediction:** Real-time current weather is used when making routing predictions.
     """)
     
     # Train models
     ai_models = AIModelSuite()
 
-    # Notify user whether we used real weather or synthetic fallback
-    if getattr(ai_models, "used_real_weather", False):
-        st.success("✅ AI models trained using real-time Open-Meteo weather data for all datacenters.")
-    else:
-        st.warning("⚠️ Open-Meteo weather data unavailable or incomplete; AI models trained on synthetic weather scenarios instead.")
+    # This block is redundant with the one below - can be removed
+    # Keeping for now for backwards compatibility
 
     
     if "All" in model_choice:
@@ -3245,14 +3248,16 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
 
     if ai_models.training_source == "real":
         st.success(
-            f"✅ Models trained on REAL Open-Meteo weather data "
-            f"({ai_models.training_samples} samples)."
+            f"✅ Models trained on HISTORICAL Open-Meteo weather data (2021-2024) "
+            f"with {ai_models.training_samples:,} samples. "
+            f"Predictions use real-time current weather."
         )
     elif ai_models.training_source == "synthetic":
         st.warning(
             f"⚠️ Models trained on SYNTHETIC physics-based data "
-            f"({ai_models.training_samples} samples), "
-            f"because real-time weather was unavailable."
+            f"({ai_models.training_samples:,} samples) "
+            f"because historical weather data was unavailable. "
+            f"Predictions use real-time current weather."
         )
     else:
         st.info("ℹ️ Training data source: unknown.")
@@ -3343,24 +3348,11 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     | Strategy | Description | Formula |
     |----------|-------------|---------|
     | **1️⃣ Random** | Baseline uniform distribution | Random allocation of prompts for each DC |
-    | **2️⃣ Energy-Only** | Route to lowest energy cost | min(E_predicted) |
-    | **3️⃣ UHI-Aware** | Penalize thermal vulnerability | Score = E × (1 + 0.05 × max(0, T-25)) |
-    | **4️⃣ Multi-Objective** | Balance all factors | Score = 0.25×E + 0.25×L + 0.25×C + 0.25×UHI |
+    | **2️⃣ Energy-Only** | Route to lowest energy DC | argmin(E) |
+    | **3️⃣ UHI-Aware** | Minimize urban heat island effect | Minimize peak UHII |
+    | **4️⃣ Multi-Objective** | Balance all factors | Weighted combination |
     """)
     
-    # 5.2 Run full simulation
-    progress_bar.progress(55, text="Running simulation...")
-    
-    results = run_simulation(
-        active_datacenters, weather_data, user_location,
-        num_requests, cooling_selections, energy_multiplier, ai_models, latency_threshold,
-        max_dc_capacity_mw
-    )
-    
-    # 5.3 Traffic Distribution
-    st.markdown('<div class="subsection-header">5.2 Traffic Distribution (Graph #6)</div>', unsafe_allow_html=True)
-    
-    fig_traffic = create_traffic_distribution_chart(results)
     st.plotly_chart(fig_traffic, use_container_width=True)
     
     # 5.4 Cooling Configuration
