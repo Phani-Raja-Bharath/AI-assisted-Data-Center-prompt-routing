@@ -1600,7 +1600,7 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
             pue = COOLING_SYSTEMS[cooling]['pue']
             dc_heat = dc_energy * pue  # Total energy including cooling overhead
             
-            # UHI contribution using Yang et al. formula
+            # # UHI contribution using physics-based heat flux model
             uhi = calculate_uhi_contribution(dc_heat / 1000, area_km2=1.0, wind_speed=wind)
             
             strategy_results['datacenters'][dc_name] = {
@@ -2582,7 +2582,7 @@ def main():
             <tr>
                 <td><strong>UHI:</strong></td>
                 <td><code>UHII = α × (Q/A) × 1/(1 + β × wind)</code></td>
-                <td style="color: #666;">Yang et al. (2024)</td>
+                <td style="color: #666;">Physics-based model (Oke, 1982)</td>
             </tr>
             <tr>
                 <td><strong>Carbon:</strong></td>
@@ -3799,9 +3799,9 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     
     <div class="reference-box">
         <strong>Urban Heat Island Calculation:</strong><br>
-        Physics-based heat flux model with empirically calibrated parameters.<br>
+        Physics-based heat flux model derived from urban energy balance principles.<br>
         Formula: ΔT = α × (Q/A) × (1/(1 + β × wind))<br>
-        <small>Reference: Yang, L., et al. (2024) defines UHII = T<sub>urban</sub> - T<sub>rural</sub></small>
+        <small>Framework: Oke (1982), Sailor (2011). Validation: Yang et al. (2024) reports global UHII ~1.0°C</small>
     </div>
     
     <div class="reference-box">
