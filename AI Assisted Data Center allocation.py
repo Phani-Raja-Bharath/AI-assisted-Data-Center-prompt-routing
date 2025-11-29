@@ -35,8 +35,20 @@ from sklearn.inspection import permutation_importance
 from scipy import stats
 import io
 import base64
+import logging
+from datetime import datetime
+import openmeteo_requests
+import requests_cache
+from retry_requests import retry
 import warnings
 warnings.filterwarnings('ignore')
+
+# Configure logging for API call tracking
+logging.basicConfig(
+    filename='datacenter_api_calls.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # Try to import Bayesian Optimization
 try:
@@ -256,6 +268,7 @@ BASE_ENERGY_WH = 0.3
 
 ENERGY_PER_PROMPT_BASE = BASE_ENERGY_WH
 
+api_fire_count = 0
 
 # Cooling Systems with PUE values from Alkrush et al. (2024)
 # International Journal of Refrigeration, 160, 246-262
@@ -562,11 +575,14 @@ def calculate_latency(distance_km, load_fraction=0.5):
 
 
 def fetch_weather_data(lat, lon, location_name="Location"):
+    global api_fire_count
     """
     Fetch real-time weather from Open-Meteo API.
     Returns temperature, humidity, and wind speed.
     """
     try:
+        api_fire_count = api_fire_count + 1
+        logging.info(f"API call #{api_fire_count} - Fetching weather for {location_name} at ({lat:.4f}, {lon:.4f})")
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m&timezone=auto"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
@@ -580,11 +596,9 @@ def fetch_weather_data(lat, lon, location_name="Location"):
                 'success': True
             }
     except Exception as e:
+        logging.warning(f"API call failed for {location_name}: {str(e)}")
         pass
 
-    print(f"[DEBUG] {location_name}: {data}")
-
-    
     # Fallback to estimated values
     return {
         'temperature': 20.0,
@@ -595,35 +609,168 @@ def fetch_weather_data(lat, lon, location_name="Location"):
     }
 
 
-def classify_climate(temperature, humidity=50):
+def classify_climate(temperature, humidity, wind_speed=None):
     """
-    Classify climate based on temperature and humidity.
-    Returns: climate category and recommended cooling.
+    Improved datacenter climate classifier using temperature, humidity, and wind.
+    Returns:
+        climate, climate_detail, recommended_cooling, emoji
     """
-    if temperature < 15:
+
+    # ----- PRIMARY CLIMATE BANDS -----
+    if temperature < 10:
         climate = "cold"
-        climate_detail = "cold"
+        climate_detail = "very_cold"
         recommended_cooling = "free_air"
-    elif temperature < 25:
+
+    elif 10 <= temperature < 20:
+        climate = "cool"
+        climate_detail = "cool_mild"
+        # Windy cool regions do better with air economizers
+        if wind_speed is not None and wind_speed >= 8:
+            recommended_cooling = "air_economizer"
+        else:
+            recommended_cooling = "free_air"
+
+    elif 20 <= temperature < 28:
         climate = "moderate"
-        climate_detail = "moderate"
-        recommended_cooling = "air_economizer"
+        climate_detail = "temperate"
+
+        # In this band, humidity decides efficiency:
+        if humidity < 60:
+            # Dry moderate → best for economizers
+            recommended_cooling = "air_economizer"
+        else:
+            # Humid moderate → free air isn't enough
+            recommended_cooling = "mechanical_chiller"
+
     else:
+        # ----- HOT REGIONS -----
+        climate = "hot"
+
         if humidity < 40:
-            climate = "hot"
             climate_detail = "hot_dry"
             recommended_cooling = "evaporative"
+
+        elif 40 <= humidity < 70:
+            climate_detail = "hot_moderate_humidity"
+            # Economizers work at night, evaporative in day → pick evaporative as general case
+            recommended_cooling = "evaporative"
+
         else:
-            climate = "hot"
             climate_detail = "hot_humid"
+            # Very humid → evaporative fails → liquid cooling
             recommended_cooling = "liquid_cooling"
-    
-    return {
-        'climate': climate,
-        'climate_detail': climate_detail,
-        'recommended_cooling': recommended_cooling,
-        'emoji': {'cold': '❄️', 'moderate': '🌤️', 'hot': '🔥'}[climate]
+
+    # ----- EMOJI -----
+    emoji_map = {
+        "cold": "❄️",
+        "cool": "🧊",
+        "moderate": "🌤️",
+        "hot": "🔥"
     }
+
+    return {
+        "climate": climate,
+        "climate_detail": climate_detail,
+        "recommended_cooling": recommended_cooling,
+        "emoji": emoji_map.get(climate, "🌍")
+    }
+
+def collect_historical_training_data(start_year=2021, end_year=2024):
+    """
+    Fetch 4 years of hourly weather for all datacenters
+    using Open-Meteo Historical Forecast API.
+    
+    Returns a SINGLE combined DataFrame:
+    columns = [location, datetime, temperature, humidity, wind_speed, cooling_type]
+    """
+    # Setup Open-Meteo API client with cache and retry on error
+    cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
+    retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
+    openmeteo = openmeteo_requests.Client(session = retry_session)
+
+    all_records = []
+
+    start_date = f"{start_year}-01-01"
+    end_date = f"{end_year}-12-31"
+
+    print(f"📥 Fetching hourly historical weather from {start_date} to {end_date}")
+
+    # Combine datacenters
+    datacenters = {}
+    for name, info in DEFAULT_DATACENTERS.items():
+        datacenters[name] = info
+    for name, info in EXTENDED_DC_LOCATIONS.items():
+        datacenters[name] = info
+
+    for dc_name, dc_info in datacenters.items():
+        # Use correct keys for latitude/longitude
+        lat = dc_info.get("lat", dc_info.get("latitude"))
+        lon = dc_info.get("lon", dc_info.get("longitude"))
+
+        if lat is None or lon is None:
+            print(f"⚠️ Skipping {dc_name}: Missing coordinates")
+            continue
+
+        url = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": start_date,
+            "end_date": end_date,
+            "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m",
+            "timezone": "auto"
+        }
+
+        try:
+            responses = openmeteo.weather_api(url, params=params)
+            response = responses[0]
+
+            hourly = response.Hourly()
+
+            # Process hourly data
+            temp = hourly.Variables(0).ValuesAsNumpy()
+            humidity = hourly.Variables(1).ValuesAsNumpy()
+            wind = hourly.Variables(2).ValuesAsNumpy()
+
+            timestamps = pd.date_range(
+                start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
+                end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+                freq=pd.Timedelta(seconds=hourly.Interval()),
+                inclusive="left"
+            )
+
+            n = len(temp)
+            print(f"  ✔ {dc_name}: {n} hourly rows")
+
+            for i in range(n):
+                # Classify climate for each hour
+                climate_info = classify_climate(temp[i], humidity[i], wind[i])
+                cooling_type = climate_info["recommended_cooling"]
+
+                all_records.append([
+                    dc_name,
+                    timestamps[i],
+                    float(temp[i]),
+                    float(humidity[i]),
+                    float(wind[i]),
+                    cooling_type
+                ])
+
+        except Exception as e:
+            print(f"❌ Error fetching {dc_name}: {e}")
+
+    df = pd.DataFrame(all_records, columns=[
+        "location",
+        "datetime",
+        "temperature",
+        "humidity",
+        "wind_speed",
+        "cooling_type"
+    ])
+
+    print(f"\n✅ Finished! Total samples collected: {len(df):,}")
+    return df
 
 
 def get_carbon_intensity(region, hour=None):
@@ -785,8 +932,39 @@ def collect_training_data(days: int = 7) -> pd.DataFrame:
         # If something goes very wrong, return empty so AIModelSuite falls back to synthetic data
         return pd.DataFrame()
 
+
     return pd.DataFrame(records)
 
+
+def apply_capacity_limit(requests, energy_per_request, max_capacity_mw):
+    """
+    Limit the number of requests based on datacenter power capacity.
+    
+    Args:
+        requests: Number of requests allocated to this datacenter
+        energy_per_request: Energy per request in Wh
+        max_capacity_mw: Maximum power capacity in MW
+    
+    Returns:
+        Capped number of requests
+    """
+    if requests == 0:
+        return 0
+    
+    # Convert capacity from MW to Wh (assuming sustained load)
+    # MW = megawatts, need to convert to watt-hours for comparison
+    max_capacity_wh = max_capacity_mw * 1e6  # MW to W
+    
+    # Calculate total energy for requested load
+    total_energy_w = requests * energy_per_request
+    
+    # If within capacity, return as-is
+    if total_energy_w <= max_capacity_wh:
+        return requests
+    
+    # Otherwise, cap to maximum capacity
+    max_requests = int(max_capacity_wh / energy_per_request)
+    return max(1, max_requests)  # Ensure at least 1 request if non-zero input
 
 
 # ============================================================================
@@ -869,47 +1047,42 @@ class AIModelSuite:
         data = []
         cooling_types = list(COOLING_SYSTEMS.keys())
 
-        # --- 1. Try real weather-based training data from Section 3 ---
+                # --- 1. Try real historical weather-based training data ---
         if use_real_weather:
             try:
-                weather_df = collect_historical_weather_data(days=days)
+                # 4 years of hourly data for all datacenters
+                weather_df = collect_historical_training_data(start_year=2021, end_year=2024)
 
                 if weather_df is not None and not weather_df.empty:
                     for _, row in weather_df.iterrows():
-                        temp = float(row.get('temperature', 20.0))
-                        humidity = float(row.get('humidity', 50.0))
-                        wind = float(row.get('wind_speed', 5.0))
+                        temp = float(row.get("temperature", 20.0))
+                        humidity = float(row.get("humidity", 50.0))
+                        wind = float(row.get("wind_speed", 5.0))
 
-                        # cooling_type string, e.g. 'evaporative', 'modern_air', 'free_cooling'
-                        cooling_str = row.get('cooling_type', None)
+                        # Derive cooling type from your climate classifier
+                        climate_info = classify_climate(temp, humidity, wind)
+                        cooling_str = climate_info.get("recommended_cooling", None)
                         if cooling_str not in cooling_types:
                             cooling_str = cooling_types[0]  # safe default
                         cooling_idx = cooling_types.index(cooling_str)
 
                         # Ground-truth energy from physics model
                         energy = calculate_energy_per_request(temp, humidity, cooling_str)
-                        energy += np.random.normal(0, 0.005)  # small noise
+                        energy += np.random.normal(0, 0.003)  # small noise
 
                         data.append([temp, humidity, wind, cooling_idx, energy])
 
-                    print(f"✅ Training on real weather data: {len(data)} samples")
+                    # Optional: track metadata in the suite
+                    self.used_real_weather = True
+                    self.training_source = "historical_real"
+                    self.training_samples = len(data)
+
+                    print(f"✅ Training on historical real weather data: {len(data)} samples")
                 else:
-                    print("⚠️ collect_training_data() returned empty – using synthetic data.")
+                    print("⚠️ collect_historical_training_data() returned empty – using synthetic data.")
             except Exception as e:
                 print(f"❌ Real weather training data error: {e}")
                 print("   Falling back to synthetic training data.")
-
-        def classify_climate(temp, humidity, wind):
-            if temp >= 30 and humidity < 60:
-                return 'evaporative'
-            elif temp <= 10:
-                return 'free_air'
-            elif wind >= 10:
-                return 'air_economizer'
-            elif humidity >= 80:
-                return 'liquid_cooling'
-            else:
-                return 'mechanical_chiller'
 
 
         # --- 2. Fallback: synthetic physics-based data (original behavior) ---
@@ -932,6 +1105,11 @@ class AIModelSuite:
             data,
             columns=['temperature', 'humidity', 'wind_speed', 'cooling_type', 'energy']
         )
+        
+        # Remove any NaN values to prevent training errors
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.dropna(inplace=True)
+        
         return df
 
     def train_all(self, train_selected='all', use_real_weather=True, days=7, n_samples=5000):
@@ -1142,10 +1320,13 @@ def route_random(datacenters, num_requests):
     return distribution
 
 
-def route_energy_only(datacenters, weather_data, cooling_selections, num_requests, ai_models=None):
+def route_energy_only(datacenters, weather_data, cooling_selections, num_requests, ai_models=None, max_dc_capacity_mw=100):
     """
     Energy-only routing - demonstrates Stockholm Concentration Problem.
     Routes to datacenter with lowest energy cost.
+    
+    Args:
+        max_dc_capacity_mw: Maximum power capacity per datacenter in MW
     """
     energy_scores = {}
     
@@ -1170,21 +1351,30 @@ def route_energy_only(datacenters, weather_data, cooling_selections, num_request
     weights = {dc: (min_energy / e) ** 3 for dc, e in energy_scores.items()}  # Cubic for strong preference
     total_weight = sum(weights.values())
     
-    distribution = {dc: int((w / total_weight) * num_requests) for dc, w in weights.items()}
+    # Apply capacity limits
+    distribution = {}
+    remaining = num_requests
+    for dc, w in weights.items():
+        base_requests = int((w / total_weight) * num_requests)
+        capped = apply_capacity_limit(base_requests, energy_scores[dc], max_dc_capacity_mw)
+        distribution[dc] = capped
+        remaining -= capped
     
-    # Ensure total matches
-    total = sum(distribution.values())
-    if total < num_requests:
+    # Distribute remaining requests
+    if remaining > 0:
         best_dc = min(energy_scores, key=energy_scores.get)
-        distribution[best_dc] += num_requests - total
+        distribution[best_dc] += remaining
     
     return distribution
 
 
-def route_uhi_aware(datacenters, weather_data, cooling_selections, num_requests, ai_models=None):
+def route_uhi_aware(datacenters, weather_data, cooling_selections, num_requests, ai_models=None, max_dc_capacity_mw=100):
     """
     UHI-Aware routing - research contribution.
     Penalizes datacenters with high thermal vulnerability.
+    
+    Args:
+        max_dc_capacity_mw: Maximum power capacity per datacenter in MW
     """
     scores = {}
     
@@ -1212,27 +1402,50 @@ def route_uhi_aware(datacenters, weather_data, cooling_selections, num_requests,
         # Combined score (lower = better)
         scores[dc_name] = energy * uhi_vulnerability * wind_benefit
     
-    # Inverse weighting
+    # Inverse weighting and capacity limiting
     max_score = max(scores.values())
     weights = {dc: max_score / s for dc, s in scores.items()}
     total_weight = sum(weights.values())
     
-    distribution = {dc: int((w / total_weight) * num_requests) for dc, w in weights.items()}
+    # Track energy for capacity calculation
+    energy_map = {}
+    for dc in datacenters:
+        weather = weather_data.get(dc, {})
+        cooling = cooling_selections.get(dc, datacenters[dc].get('default_cooling', 'air_economizer'))
+        temp = weather.get('temperature', 20)
+        humidity = weather.get('humidity', 50)
+        wind = weather.get('wind_speed', 5)
+        if ai_models and ai_models.is_trained:
+            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
+            energy_map[dc] = ai_models.predict([temp, humidity, wind, cooling_idx])
+        else:
+            energy_map[dc] = calculate_energy_per_request(temp, humidity, cooling)
     
-    # Ensure total matches
-    total = sum(distribution.values())
-    if total < num_requests:
+    # Apply capacity limits
+    distribution = {}
+    remaining = num_requests
+    for dc, w in weights.items():
+        base_requests = int((w / total_weight) * num_requests)
+        capped = apply_capacity_limit(base_requests, energy_map[dc], max_dc_capacity_mw)
+        distribution[dc] = capped
+        remaining -= capped
+    
+    # Distribute remaining
+    if remaining > 0:
         best_dc = min(scores, key=scores.get)
-        distribution[best_dc] += num_requests - total
+        distribution[best_dc] += remaining
     
     return distribution
 
 
 def route_multi_objective(datacenters, weather_data, cooling_selections, user_location, 
-                          num_requests, ai_models=None, latency_threshold=100):
+                          num_requests, ai_models=None, latency_threshold=100, max_dc_capacity_mw=100):
     """
     Multi-objective routing - balances Energy, Latency, Carbon, UHI.
     Equal weights (0.25 each) by default.
+    
+    Args:
+        max_dc_capacity_mw: Maximum power capacity per datacenter in MW
     """
     user_lat, user_lon = user_location
     hour = datetime.now().hour
@@ -1271,18 +1484,38 @@ def route_multi_objective(datacenters, weather_data, cooling_selections, user_lo
         # Combined score (lower = better) - equal weights
         scores[dc_name] = 0.25 * energy_norm + 0.25 * latency_norm + 0.25 * carbon_norm + 0.25 * uhi_score
     
-    # Softmax-like distribution for balance
+    # Softmax-like distribution for balance with capacity limits
     min_score = min(scores.values())
     weights = {dc: np.exp(-(s - min_score) * 3) for dc, s in scores.items()}
     total_weight = sum(weights.values())
     
-    distribution = {dc: int((w / total_weight) * num_requests) for dc, w in weights.items()}
+    # Store energy for capacity calculation
+    energy_map = {}
+    for dc in datacenters:
+        weather = weather_data.get(dc, {})
+        cooling = cooling_selections.get(dc, datacenters[dc].get('default_cooling', 'air_economizer'))
+        temp = weather.get('temperature', 20)
+        humidity = weather.get('humidity', 50)
+        wind = weather.get('wind_speed', 5)
+        if ai_models and ai_models.is_trained:
+            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
+            energy_map[dc] = ai_models.predict([temp, humidity, wind, cooling_idx])
+        else:
+            energy_map[dc] = calculate_energy_per_request(temp, humidity, cooling)
     
-    # Ensure total matches
-    total = sum(distribution.values())
-    if total < num_requests:
+    # Apply capacity limits
+    distribution = {}
+    remaining = num_requests
+    for dc, w in weights.items():
+        base_requests = int((w / total_weight) * num_requests)
+        capped = apply_capacity_limit(base_requests, energy_map[dc], max_dc_capacity_mw)
+        distribution[dc] = capped
+        remaining -= capped
+    
+    # Distribute remaining
+    if remaining > 0:
         best_dc = min(scores, key=scores.get)
-        distribution[best_dc] += num_requests - total
+        distribution[best_dc] += remaining
     
     return distribution
 
@@ -1293,10 +1526,13 @@ def route_multi_objective(datacenters, weather_data, cooling_selections, user_lo
 
 def run_simulation(datacenters, weather_data, user_location, num_requests,
                    cooling_selections, energy_multiplier=1.0, ai_models=None,
-                   latency_threshold=100):
+                   latency_threshold=100, max_dc_capacity_mw=100):
     """
     Run complete simulation for all routing strategies.
     Returns comprehensive metrics for comparison.
+    
+    Args:
+        max_dc_capacity_mw: Maximum power capacity per datacenter in MW
     """
     user_lat, user_lon = user_location
     hour = datetime.now().hour
@@ -1305,12 +1541,12 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
     strategies = {
         'Random': route_random(datacenters, num_requests),
         'Energy-Only': route_energy_only(datacenters, weather_data, cooling_selections, 
-                                          num_requests, ai_models),
+                                          num_requests, ai_models, max_dc_capacity_mw),
         'UHI-Aware': route_uhi_aware(datacenters, weather_data, cooling_selections,
-                                      num_requests, ai_models),
+                                      num_requests, ai_models, max_dc_capacity_mw),
         'Multi-Objective': route_multi_objective(datacenters, weather_data, cooling_selections,
                                                   user_location, num_requests, ai_models,
-                                                  latency_threshold)
+                                                  latency_threshold, max_dc_capacity_mw)
     }
     
     results = {}
@@ -2654,6 +2890,11 @@ def main():
                 step=10,
                 help="Maximum acceptable latency for routing decisions"
             )
+            max_dc_capacity_mw = st.slider(
+"Max Power Capacity per Datacenter (MW)",
+min_value=10, max_value=200, value=100, step=10,
+help="Limits max energy draw per DC in megawatts. Used to cap request allocation."
+)
         
         with col2:
             energy_multiplier = st.slider(
@@ -3112,7 +3353,8 @@ def main():
     
     results = run_simulation(
         active_datacenters, weather_data, user_location,
-        num_requests, cooling_selections, energy_multiplier, ai_models, latency_threshold
+        num_requests, cooling_selections, energy_multiplier, ai_models, latency_threshold,
+        max_dc_capacity_mw
     )
     
     # 5.3 Traffic Distribution
