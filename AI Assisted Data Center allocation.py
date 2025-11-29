@@ -36,7 +36,6 @@ from scipy import stats
 import io
 import base64
 import logging
-from datetime import datetime
 import openmeteo_requests
 import requests_cache
 from retry_requests import retry
@@ -566,7 +565,7 @@ def calculate_latency(distance_km, load_fraction=0.5):
     if arrival_rate >= service_rate * 0.99:
         queueing_ms = 200  # Congested
     else:
-        queueing_ms = min(200, 1000 / max(1, service_rate - arrival_rate))
+        queueing_ms = min(200, 1000 / max(0.1, service_rate - arrival_rate))
     
     # Base processing time
     processing_ms = 30
@@ -841,9 +840,13 @@ def calculate_energy_per_request(temperature, humidity, cooling_type, energy_mul
 
 def calculate_uhi_contribution(heat_kwh, area_km2=1.0, wind_speed=5.0):
     """
-    Calculate Urban Heat Island contribution using Yang et al. (2024) formula.
+    Estimate local UHI contribution using physics-based heat flux model.
     
-    Formula: UHII = α × (Q_waste / A) × (1 / (1 + β × wind))
+    Formula: ΔT = α × (Q/A) × (1/(1 + β × wind))
+    
+    This model is derived from thermodynamic principles:
+    - Heat flux density (Q/A) drives local temperature rise
+    - Wind provides convective heat dissipation
     
     Parameters:
     - α = 0.0012: Heat-to-temperature coefficient (°C per kW/km²)
@@ -925,8 +928,7 @@ def collect_training_data(days: int = 7) -> pd.DataFrame:
             }
         )
 
-    if not w['success']:
-        failure_count += 1
+
 
     if not records:
         # If something goes very wrong, return empty so AIModelSuite falls back to synthetic data
@@ -1352,7 +1354,7 @@ def route_energy_only(datacenters, weather_data, cooling_selections, num_request
     
     # Inverse weighting: lower energy = higher weight
     min_energy = min(energy_scores.values())
-    weights = {dc: (min_energy / e) ** 3 for dc, e in energy_scores.items()}  # Cubic for strong preference
+    weights = {dc: (min_energy / max(e, 0.001)) ** 3 for dc, e in energy_scores.items()}  # Cubic for strong preference
     total_weight = sum(weights.values())
     
     # Apply capacity limits
@@ -3797,8 +3799,9 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     
     <div class="reference-box">
         <strong>Urban Heat Island Calculation:</strong><br>
-        Yang, L., et al. (2024). Urban Heat Island effect modeling and mitigation strategies.<br>
-        Formula: UHII = α × (Q/A) × (1/(1 + β × wind))
+        Physics-based heat flux model with empirically calibrated parameters.<br>
+        Formula: ΔT = α × (Q/A) × (1/(1 + β × wind))<br>
+        <small>Reference: Yang, L., et al. (2024) defines UHII = T<sub>urban</sub> - T<sub>rural</sub></small>
     </div>
     
     <div class="reference-box">
