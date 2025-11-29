@@ -581,6 +581,9 @@ def fetch_weather_data(lat, lon, location_name="Location"):
             }
     except Exception as e:
         pass
+
+    print(f"[DEBUG] {location_name}: {data}")
+
     
     # Fallback to estimated values
     return {
@@ -775,6 +778,9 @@ def collect_training_data(days: int = 7) -> pd.DataFrame:
             }
         )
 
+    if not w['success']:
+        failure_count += 1
+
     if not records:
         # If something goes very wrong, return empty so AIModelSuite falls back to synthetic data
         return pd.DataFrame()
@@ -904,7 +910,7 @@ class AIModelSuite:
                 cooling_str = cooling_types[cooling_idx]
 
                 energy = calculate_energy_per_request(temp, humidity, cooling_str)
-                energy += np.random.normal(0, 0.01)
+                energy += np.random.normal(0, 0.005)
 
                 data.append([temp, humidity, wind, cooling_idx, energy])
             print(f"✅ Training on synthetic physics-based data: {len(data)} samples")
@@ -915,7 +921,7 @@ class AIModelSuite:
         )
         return df
 
-    def train_all(self, train_selected='all', use_real_weather=True, days=7):
+    def train_all(self, train_selected='all', use_real_weather=True, days=7, n_samples=5000):
         """
         Train all or selected models.
 
@@ -925,7 +931,7 @@ class AIModelSuite:
         - days: number of days of historical weather to pull per datacenter
         """
         df = self.generate_training_data(
-            n_samples=500,
+            n_samples=n_samples,
             days=days,
             use_real_weather=use_real_weather
         )
@@ -982,8 +988,9 @@ class AIModelSuite:
                 'y_test': y_test,
                 'architecture': '64→32→16'
             }
+            print(f"[DEBUG] ANN R²: {results['ANN']['r2']:.4f}")
 
-        # 3. Bayesian Optimization (if available)
+        # 3. Bayesian Optimization 
         if train_selected in ['all', 'bayesian'] and BAYES_AVAILABLE:
             try:
                 def ann_objective(hidden1, hidden2, alpha):
@@ -991,9 +998,10 @@ class AIModelSuite:
                     model = MLPRegressor(
                         hidden_layer_sizes=(h1, h2),
                         alpha=alpha,
-                        max_iter=200,
+                        max_iter=300,
                         random_state=42,
                         early_stopping=True
+                        validation_fraction=0.15
                     )
                     model.fit(X_train_scaled, y_train)
                     return r2_score(y_test, model.predict(X_test_scaled))
@@ -1029,6 +1037,8 @@ class AIModelSuite:
                     'y_test': y_test,
                     'best_params': best
                 }
+                print(f"[DEBUG] Bayesian R²: {results['Bayesian']['r2']:.4f}")
+                print(f"[DEBUG] Best params: {best}")
             except Exception as e:
                 results['Bayesian'] = {'error': str(e)}
 
@@ -2408,6 +2418,7 @@ def main():
             st.session_state.user_lon,
             st.session_state.user_label
         )
+        
 
         st.markdown(f"""
         <div class="info-box">
@@ -2954,7 +2965,7 @@ def main():
     - Energy per Request (Wh)
     
     **Dataset:** Real-time weather samples from all active datacenter locations,
-    with synthetic fallback (5000 training samples, 150 test samples (70/30 split)) if live data is unavailable.
+    with synthetic fallback (5000 training samples & 70/30 split) if live data is unavailable.
     """)
     
     # Train models
