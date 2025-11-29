@@ -1553,19 +1553,27 @@ def create_traffic_distribution_chart(results, title="Traffic Distribution by St
             y=values,
             marker_color=climate_colors.get(climate, '#6b7280'),
             text=[f"{v:,}" for v in values],
-            textposition='auto',
+            textposition='outside',          
+            textfont=dict(size=11),
+            cliponaxis=False,                
             hovertemplate=f"<b>{short_name}</b><br>%{{x}}: %{{y:,}} requests<extra></extra>"
         ))
+
     
     fig.update_layout(
         title=dict(text=title, font=dict(size=16, family='Source Serif 4')),
         xaxis_title="Routing Strategy",
         yaxis_title="Number of Requests",
         barmode='group',
+        bargap=0.25,              
+        bargroupgap=0.1,          
         height=400,
         legend=dict(orientation='h', y=-0.15, x=0.5, xanchor='center'),
-        font=dict(family='Source Sans 3')
+        font=dict(family='Source Sans 3'),
+        uniformtext_minsize=10,   
+        uniformtext_mode='hide'   
     )
+
     
     return fig
 
@@ -2335,6 +2343,8 @@ def main():
             st.session_state.user_lat = 28.5383   # Orlando default
             st.session_state.user_lon = -81.3792
             st.session_state.user_label = "Orlando"
+            st.session_state.user_lat_input = 28.5383
+            st.session_state.user_lon_input = -81.3792
 
         col1, col2, col3 = st.columns([2, 1, 1])
 
@@ -2965,6 +2975,21 @@ def main():
         train_mode = 'bayesian' if BAYES_AVAILABLE else 'mlr'
     
     model_results = ai_models.train_all(train_mode)
+
+    if ai_models.training_source == "real":
+        st.success(
+            f"✅ Models trained on REAL Open-Meteo weather data "
+            f"({ai_models.training_samples} samples)."
+        )
+    elif ai_models.training_source == "synthetic":
+        st.warning(
+            f"⚠️ Models trained on SYNTHETIC physics-based data "
+            f"({ai_models.training_samples} samples), "
+            f"because real-time weather was unavailable."
+        )
+    else:
+        st.info("ℹ️ Training data source: unknown.")
+
     
     # 4.2 Model Performance
     st.markdown('<div class="subsection-header">4.2 Model Performance Comparison (Graph #3)</div>', unsafe_allow_html=True)
