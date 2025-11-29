@@ -2375,7 +2375,6 @@ def main():
         with col2:
             st.number_input(
                 "Latitude",
-                value=float(st.session_state.user_lat),
                 format="%.4f",
                 key="user_lat_input",
                 on_change=lambda: setattr(st.session_state, 'user_lat', st.session_state.user_lat_input)
@@ -2383,7 +2382,6 @@ def main():
         with col3:
             st.number_input(
                 "Longitude",
-                value=float(st.session_state.user_lon),
                 format="%.4f",
                 key="user_lon_input",
                 on_change=lambda: setattr(st.session_state, 'user_lon', st.session_state.user_lon_input)
