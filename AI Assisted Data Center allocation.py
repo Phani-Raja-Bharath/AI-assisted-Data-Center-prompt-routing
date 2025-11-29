@@ -872,7 +872,7 @@ class AIModelSuite:
         # --- 1. Try real weather-based training data from Section 3 ---
         if use_real_weather:
             try:
-                weather_df = collect_training_data(days=days)
+                weather_df = collect_historical_weather_data(days=days)
 
                 if weather_df is not None and not weather_df.empty:
                     for _, row in weather_df.iterrows():
@@ -898,6 +898,19 @@ class AIModelSuite:
             except Exception as e:
                 print(f"❌ Real weather training data error: {e}")
                 print("   Falling back to synthetic training data.")
+
+        def classify_climate(temp, humidity, wind):
+            if temp >= 30 and humidity < 60:
+                return 'evaporative'
+            elif temp <= 10:
+                return 'free_air'
+            elif wind >= 10:
+                return 'air_economizer'
+            elif humidity >= 80:
+                return 'liquid_cooling'
+            else:
+                return 'mechanical_chiller'
+
 
         # --- 2. Fallback: synthetic physics-based data (original behavior) ---
         if not data:
@@ -1000,7 +1013,7 @@ class AIModelSuite:
                         alpha=alpha,
                         max_iter=300,
                         random_state=42,
-                        early_stopping=True
+                        early_stopping=True,
                         validation_fraction=0.15
                     )
                     model.fit(X_train_scaled, y_train)
