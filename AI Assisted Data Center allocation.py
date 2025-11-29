@@ -254,6 +254,9 @@ st.markdown("""
 # Base energy per AI prompt (Stern, 2025 - WSJ)
 BASE_ENERGY_WH = 0.3
 
+ENERGY_PER_PROMPT_BASE = BASE_ENERGY_WH
+
+
 # Cooling Systems with PUE values from Alkrush et al. (2024)
 # International Journal of Refrigeration, 160, 246-262
 COOLING_SYSTEMS = {
@@ -476,7 +479,7 @@ def create_pdf_report(results, final_rec):
     summary_text = (
         f"Recommended Strategy: {final_rec['recommended_strategy']}\n\n"
         f"Reasoning:\n" + 
-        "\n".join([f"- {r}" for r in final_rec['reasoning']])
+        "\n".join([f"- {r.replace('✅', '[OK]').replace('⚠️', '[WARN]').replace('❌', '[X]').replace('🌡️', '').replace('🔥', '').replace('⏱️', '').replace('⚡', '')}" for r in final_rec['reasoning']])
     )
     pdf.multi_cell(0, 7, summary_text)
     pdf.ln(10)
@@ -718,6 +721,110 @@ def get_optimal_cooling_for_climate(climate_detail):
     }
     return recommendations.get(climate_detail, ('air_economizer', "Default recommendation for mixed conditions"))
 
+def collect_training_data(days: int = 7) -> pd.DataFrame:
+    """
+    Collects a small, real-weather training dataset for AIModelSuite.
+
+    Columns returned:
+    - temperature
+    - humidity
+    - wind_speed
+    - cooling_type   (string: one of COOLING_SYSTEMS keys)
+
+    This uses:
+      - DEFAULT_DATACENTERS
+      - EXTENDED_DC_LOCATIONS
+      - fetch_weather_data()
+      - classify_climate()
+      - get_optimal_cooling_for_climate()
+
+    The 'days' argument is kept for compatibility with generate_training_data(),
+    but in this simple version we just sample current conditions once per site.
+    """
+    records = []
+
+    # 1) Default datacenters (Phoenix, SF, Stockholm, ...)
+    for dc_name, dc_info in DEFAULT_DATACENTERS.items():
+        w = fetch_weather_data(dc_info["lat"], dc_info["lon"], dc_name)
+        records.append(
+            {
+                "datacenter": dc_name,
+                "temperature": w["temperature"],
+                "humidity": w["humidity"],
+                "wind_speed": w["wind_speed"],
+                # use the configured default cooling for that DC
+                "cooling_type": dc_info.get("default_cooling", "mechanical_chiller"),
+            }
+        )
+
+    # 2) Extended locations (Dublin, London, Singapore, etc.)
+    for dc_name, loc in EXTENDED_DC_LOCATIONS.items():
+        w = fetch_weather_data(loc["lat"], loc["lon"], dc_name)
+
+        # choose a cooling type based on climate at that moment
+        climate_info = classify_climate(w["temperature"], w["humidity"])
+        cooling_key, _ = get_optimal_cooling_for_climate(climate_info["climate_detail"])
+
+        records.append(
+            {
+                "datacenter": dc_name,
+                "temperature": w["temperature"],
+                "humidity": w["humidity"],
+                "wind_speed": w["wind_speed"],
+                "cooling_type": cooling_key,
+            }
+        )
+
+    if not records:
+        # If something goes very wrong, return empty so AIModelSuite falls back to synthetic data
+        return pd.DataFrame()
+
+    return pd.DataFrame(records)
+
+
+
+# ============================================================================
+# FEATURE ENGINEERING FOR AI MODELS
+# ============================================================================
+
+def engineer_features(df):
+    """
+    Take raw weather + DC info and add engineered features for ML:
+    - pue (from cooling type)
+    - base_capacity_mw (simple default for now)
+    - urban_density (simple default)
+    - carbon_intensity (simple default)
+    - utilization (simulated load)
+    - energy_wh (target)
+    """
+    if df is None or df.empty:
+        raise ValueError("Empty dataframe passed to engineer_features().")
+
+    # 1. PUE based on cooling type using existing COOLING_SYSTEMS
+    def get_pue_from_cooling(cooling_type):
+        cooling = COOLING_SYSTEMS.get(cooling_type)
+        if cooling is None:
+            # Fallback to mechanical_chiller if unknown
+            cooling = COOLING_SYSTEMS["mechanical_chiller"]
+        return cooling["pue"]
+
+    df["pue"] = df["cooling_type"].apply(get_pue_from_cooling)
+
+    # 2. Simple datacenter-level features (you can refine later per-DC)
+    #    For now, use reasonable defaults — these can be made DC-specific later.
+    df["base_capacity_mw"] = 50.0       # assume 50 MW DC
+    df["urban_density"] = 0.7           # assume relatively dense urban siting
+    df["carbon_intensity"] = 300.0      # gCO2/kWh, generic grid mix
+
+    # 3. Simulate utilization (0.3–0.85). In production, this would be real load.
+    df["utilization"] = np.random.uniform(0.3, 0.85, len(df))
+
+    # 4. Target: Energy per prompt (Wh), physics-informed
+    df["energy_wh"] = ENERGY_PER_PROMPT_BASE * df["pue"] * (
+        1 + df["utilization"] * 0.1
+    )
+
+    return df
 
 # ============================================================================
 # AI MODEL SUITE
@@ -727,6 +834,10 @@ class AIModelSuite:
     """
     Suite of AI models for energy prediction.
     Models: MLR, ANN, Bayesian-optimized ANN
+
+    Training data:
+    - Prefer real weather (Open-Meteo) from collect_training_data()
+    - Fall back to synthetic physics-based data if needed
     """
     
     def __init__(self):
@@ -735,53 +846,103 @@ class AIModelSuite:
         self.metrics = {}
         self.feature_names = ['temperature', 'humidity', 'wind_speed', 'cooling_type']
         self.is_trained = False
-    
-    def generate_training_data(self, n_samples=500):
-        """Generate synthetic training data based on physics model."""
-        np.random.seed(42)
-        
+        self.used_real_weather = False 
+
+    def generate_training_data(self, n_samples=500, days=7, use_real_weather=True):
+        """
+        Build training dataset.
+
+        Priority:
+        1) Use real weather-based records from collect_training_data()
+           and compute energy via physics model.
+        2) If unavailable / error / empty, fall back to synthetic data
+           (uniform sampling + physics model).
+        """
         data = []
         cooling_types = list(COOLING_SYSTEMS.keys())
-        
-        for _ in range(n_samples):
-            temp = np.random.uniform(0, 45)
-            humidity = np.random.uniform(20, 95)
-            wind = np.random.uniform(0.5, 15)
-            cooling_idx = np.random.randint(0, len(cooling_types))
-            cooling = cooling_types[cooling_idx]
-            
-            # Calculate energy using physics model (ground truth)
-            energy = calculate_energy_per_request(temp, humidity, cooling)
-            
-            # Add small noise to simulate real-world variation
-            energy += np.random.normal(0, 0.01)
-            
-            data.append([temp, humidity, wind, cooling_idx, energy])
-        
-        df = pd.DataFrame(data, columns=['temperature', 'humidity', 'wind_speed', 'cooling_type', 'energy'])
+
+        # --- 1. Try real weather-based training data from Section 3 ---
+        if use_real_weather:
+            try:
+                weather_df = collect_training_data(days=days)
+
+                if weather_df is not None and not weather_df.empty:
+                    for _, row in weather_df.iterrows():
+                        temp = float(row.get('temperature', 20.0))
+                        humidity = float(row.get('humidity', 50.0))
+                        wind = float(row.get('wind_speed', 5.0))
+
+                        # cooling_type string, e.g. 'evaporative', 'modern_air', 'free_cooling'
+                        cooling_str = row.get('cooling_type', None)
+                        if cooling_str not in cooling_types:
+                            cooling_str = cooling_types[0]  # safe default
+                        cooling_idx = cooling_types.index(cooling_str)
+
+                        # Ground-truth energy from physics model
+                        energy = calculate_energy_per_request(temp, humidity, cooling_str)
+                        energy += np.random.normal(0, 0.01)  # small noise
+
+                        data.append([temp, humidity, wind, cooling_idx, energy])
+
+                    print(f"✅ Training on real weather data: {len(data)} samples")
+                else:
+                    print("⚠️ collect_training_data() returned empty – using synthetic data.")
+            except Exception as e:
+                print(f"❌ Real weather training data error: {e}")
+                print("   Falling back to synthetic training data.")
+
+        # --- 2. Fallback: synthetic physics-based data (original behavior) ---
+        if not data:
+            np.random.seed(42)
+            for _ in range(n_samples):
+                temp = np.random.uniform(0, 45)
+                humidity = np.random.uniform(20, 95)
+                wind = np.random.uniform(0.5, 15)
+                cooling_idx = np.random.randint(0, len(cooling_types))
+                cooling_str = cooling_types[cooling_idx]
+
+                energy = calculate_energy_per_request(temp, humidity, cooling_str)
+                energy += np.random.normal(0, 0.01)
+
+                data.append([temp, humidity, wind, cooling_idx, energy])
+            print(f"✅ Training on synthetic physics-based data: {len(data)} samples")
+
+        df = pd.DataFrame(
+            data,
+            columns=['temperature', 'humidity', 'wind_speed', 'cooling_type', 'energy']
+        )
         return df
-    
-    def train_all(self, train_selected='all'):
+
+    def train_all(self, train_selected='all', use_real_weather=True, days=7):
         """
         Train all or selected models.
-        
+
         Parameters:
         - train_selected: 'all', 'mlr', 'ann', 'bayesian'
+        - use_real_weather: if True, try real Open-Meteo-based data first
+        - days: number of days of historical weather to pull per datacenter
         """
-        df = self.generate_training_data()
+        df = self.generate_training_data(
+            n_samples=500,
+            days=days,
+            use_real_weather=use_real_weather
+        )
+
         X = df[['temperature', 'humidity', 'wind_speed', 'cooling_type']].values
         y = df['energy'].values
-        
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-        
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42
+        )
+
         # Standardize features
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
         self.scalers['main'] = scaler
-        
+
         results = {}
-        
+
         # 1. Multiple Linear Regression
         if train_selected in ['all', 'mlr']:
             mlr = LinearRegression()
@@ -796,7 +957,7 @@ class AIModelSuite:
                 'y_test': y_test,
                 'coefficients': dict(zip(self.feature_names, mlr.coef_))
             }
-        
+
         # 2. Artificial Neural Network
         if train_selected in ['all', 'ann']:
             ann = MLPRegressor(
@@ -819,7 +980,7 @@ class AIModelSuite:
                 'y_test': y_test,
                 'architecture': '64→32→16'
             }
-        
+
         # 3. Bayesian Optimization (if available)
         if train_selected in ['all', 'bayesian'] and BAYES_AVAILABLE:
             try:
@@ -834,7 +995,7 @@ class AIModelSuite:
                     )
                     model.fit(X_train_scaled, y_train)
                     return r2_score(y_test, model.predict(X_test_scaled))
-                
+
                 optimizer = BayesianOptimization(
                     f=ann_objective,
                     pbounds={
@@ -847,7 +1008,7 @@ class AIModelSuite:
                 )
                 optimizer.maximize(init_points=3, n_iter=7)
                 best = optimizer.max['params']
-                
+
                 bayes_ann = MLPRegressor(
                     hidden_layer_sizes=(int(best['hidden1']), int(best['hidden2'])),
                     alpha=best['alpha'],
@@ -868,30 +1029,30 @@ class AIModelSuite:
                 }
             except Exception as e:
                 results['Bayesian'] = {'error': str(e)}
-        
-        # Calculate feature importance using permutation importance
+
+        # Feature importance (ANN)
         if 'ANN' in self.models:
             try:
                 perm_importance = permutation_importance(
-                    self.models['ANN'], X_test_scaled, y_test, 
+                    self.models['ANN'], X_test_scaled, y_test,
                     n_repeats=10, random_state=42
                 )
                 results['feature_importance'] = dict(zip(
-                    self.feature_names, 
+                    self.feature_names,
                     perm_importance.importances_mean
                 ))
-            except:
+            except Exception:
                 results['feature_importance'] = {
                     'temperature': 0.45,
                     'cooling_type': 0.35,
                     'humidity': 0.12,
                     'wind_speed': 0.08
                 }
-        
+
         self.metrics = results
         self.is_trained = True
         return results
-    
+
     def predict(self, features, model_name=None):
         """
         Predict energy using specified or best model.
@@ -899,26 +1060,26 @@ class AIModelSuite:
         """
         if not self.is_trained:
             raise ValueError("Models not trained. Call train_all() first.")
-        
+
         if model_name is None:
             model_name = self.get_best_model()[0]
-        
+
         if model_name not in self.models:
             model_name = list(self.models.keys())[0]
-        
+
         X = np.array(features).reshape(1, -1)
         X_scaled = self.scalers['main'].transform(X)
-        
+
         return self.models[model_name].predict(X_scaled)[0]
-    
+
     def get_best_model(self):
         """Return the model with highest R²."""
         if not self.metrics:
             return ('MLR', 0.0)
-        
+
         best_name = None
         best_r2 = -np.inf
-        
+
         for name, metrics in self.metrics.items():
             if name == 'feature_importance':
                 continue
@@ -926,7 +1087,7 @@ class AIModelSuite:
                 if metrics['r2'] > best_r2:
                     best_r2 = metrics['r2']
                     best_name = name
-        
+
         return (best_name or 'MLR', best_r2)
 
 
@@ -2782,11 +2943,19 @@ def main():
     **Target (y):**
     - Energy per Request (Wh)
     
-    **Dataset:** 500 training samples, 150 test samples (70/30 split)
+    **Dataset:** Real-time weather samples from all active datacenter locations,
+    with synthetic fallback (500 training samples, 150 test samples (70/30 split)) if live data is unavailable.
     """)
     
     # Train models
     ai_models = AIModelSuite()
+
+    # Notify user whether we used real weather or synthetic fallback
+    if getattr(ai_models, "used_real_weather", False):
+        st.success("✅ AI models trained using real-time Open-Meteo weather data for all datacenters.")
+    else:
+        st.warning("⚠️ Open-Meteo weather data unavailable or incomplete; AI models trained on synthetic weather scenarios instead.")
+
     
     if "All" in model_choice:
         train_mode = 'all'
@@ -2883,8 +3052,8 @@ def main():
     st.markdown("""
     | Strategy | Description | Formula |
     |----------|-------------|---------|
-    | **1️⃣ Random** | Baseline uniform distribution | Equal probability for each DC |
-    | **2️⃣ Energy-Only** | Route to lowest energy cost | min(E_predicted) → Creates concentration |
+    | **1️⃣ Random** | Baseline uniform distribution | Random allocation of prompts for each DC |
+    | **2️⃣ Energy-Only** | Route to lowest energy cost | min(E_predicted) |
     | **3️⃣ UHI-Aware** | Penalize thermal vulnerability | Score = E × (1 + 0.05 × max(0, T-25)) |
     | **4️⃣ Multi-Objective** | Balance all factors | Score = 0.25×E + 0.25×L + 0.25×C + 0.25×UHI |
     """)
