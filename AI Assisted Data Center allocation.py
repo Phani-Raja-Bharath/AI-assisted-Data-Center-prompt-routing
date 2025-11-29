@@ -1553,9 +1553,15 @@ def create_traffic_distribution_chart(results, title="Traffic Distribution by St
             y=values,
             marker_color=climate_colors.get(climate, '#6b7280'),
             text=[f"{v:,}" for v in values],
+<<<<<<< HEAD
             textposition='outside',          
             textfont=dict(size=11),
             cliponaxis=False,                
+=======
+            textposition='outside',          # was 'auto'
+            textfont=dict(size=11),
+            cliponaxis=False,                # allows text outside the axis area
+>>>>>>> 93f39a3ce911bc3181b3d992706b2b03d134123a
             hovertemplate=f"<b>{short_name}</b><br>%{{x}}: %{{y:,}} requests<extra></extra>"
         ))
 
@@ -1565,6 +1571,7 @@ def create_traffic_distribution_chart(results, title="Traffic Distribution by St
         xaxis_title="Routing Strategy",
         yaxis_title="Number of Requests",
         barmode='group',
+<<<<<<< HEAD
         bargap=0.25,              
         bargroupgap=0.1,          
         height=400,
@@ -1572,6 +1579,15 @@ def create_traffic_distribution_chart(results, title="Traffic Distribution by St
         font=dict(family='Source Sans 3'),
         uniformtext_minsize=10,   
         uniformtext_mode='hide'   
+=======
+        bargap=0.25,              # extra gap between groups
+        bargroupgap=0.1,          # gap between bars in a group
+        height=400,
+        legend=dict(orientation='h', y=-0.15, x=0.5, xanchor='center'),
+        font=dict(family='Source Sans 3'),
+        uniformtext_minsize=10,   # if text would be too cramped…
+        uniformtext_mode='hide'   # …Plotly hides overlapping labels
+>>>>>>> 93f39a3ce911bc3181b3d992706b2b03d134123a
     )
 
     
