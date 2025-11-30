@@ -2677,7 +2677,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Key Formulas
+   ''' # Key Formulas
     st.markdown("""
     <div class="info-box" style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-left: 4px solid #2563eb;">
         <strong>📐 Key Formulas Used:</strong>
@@ -2704,7 +2704,7 @@ def main():
             </tr>
         </table>
     </div>
-    """, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)'''
     
     # ========================================================================
     # SECTION 1: EXPERIMENTAL SETUP
