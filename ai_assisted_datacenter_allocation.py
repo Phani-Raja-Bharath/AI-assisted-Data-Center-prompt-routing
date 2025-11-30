@@ -1169,6 +1169,7 @@ class AIModelSuite:
                 'y_test': y_test,
                 'coefficients': dict(zip(self.feature_names, mlr.coef_))
             }
+            print(f"[DEBUG] MLR R²: {results['MLR']['r2']:.4f}")
 
         # 2. Artificial Neural Network
         if train_selected in ['all', 'ann']:
