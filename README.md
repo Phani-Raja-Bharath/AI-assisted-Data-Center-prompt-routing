@@ -1,7 +1,7 @@
 
 ---
 
-## 🔬 Modeling Approach
+## Modeling Approach
 
 ### Energy Consumption per Request
 
@@ -38,7 +38,7 @@ Latency is decomposed into:
 
 ---
 
-## 🤖 Machine Learning Models
+## Machine Learning Models
 
 The system predicts energy consumption per request using:
 
@@ -56,7 +56,7 @@ The system predicts energy consumption per request using:
 
 ---
 
-## 🔀 Routing Strategies Evaluated
+## Routing Strategies Evaluated
 
 | Strategy | Description |
 |--------|-------------|
@@ -67,7 +67,7 @@ The system predicts energy consumption per request using:
 
 ---
 
-## 📊 Monte Carlo Validation
+## Monte Carlo Validation
 
 To ensure robustness:
 - Weather parameters are perturbed stochastically
@@ -79,7 +79,7 @@ Results show statistically significant reductions in peak UHI intensity.
 
 ---
 
-## 📈 Key Outcomes
+## Key Outcomes
 
 - 40–60% reduction in peak UHI intensity
 - Over 50% reduction in spatial heat concentration
@@ -91,7 +91,7 @@ Routing strategy selection has a larger sustainability impact than the choice of
 
 ---
 
-## 🖥️ Dashboard Features
+## Dashboard Features
 
 - Real-time weather integration
 - Geographic routing visualization
@@ -103,7 +103,7 @@ Routing strategy selection has a larger sustainability impact than the choice of
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - Python
 - Streamlit
@@ -114,7 +114,7 @@ Routing strategy selection has a larger sustainability impact than the choice of
 
 ---
 
-## 🚀 How to Run
+## How to Run
 
 ```bash
 git clone https://github.com/<your-username>/ai-datacenter-uhi-routing.git
