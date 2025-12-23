@@ -1,19 +1,10 @@
 """
 ================================================================================
 AI-ASSISTED DATACENTER ROUTING FOR UHI MITIGATION
-Production Dashboard for ACM e-Energy 2026 Conference
-
-Author: Phani Raja Bharath Balijepalli
-Course: IDS6938 - AI, Energy, and Sustainability
-University of Central Florida
-Advisor: Prof. Veeraraghava Raju Hasti
-
 Research Contribution:
 - Data center created UHI mitigation problem identification
 - Multi-objective routing with UHI mitigation
 - Statistical validation through Monte Carlo simulation
-
-All values are DYNAMICALLY CALCULATED, not hardcoded.
 ================================================================================
 """
 
@@ -2654,7 +2645,7 @@ def main():
     st.markdown("""
     <div style="text-align: center; padding: 1.5rem 0;">
         <h1 style="font-family: 'Source Serif 4', serif; font-size: 2.2rem; color: #1a1a2e; margin-bottom: 0.5rem;">
-            🌡️ AI-Assisted Datacenter Routing for UHI Mitigation
+            🌡️ AI-Assisted Datacenter Prompt Routing for UHI Mitigation
         </h1>
         <p style="font-family: 'Source Sans 3', sans-serif; color: #4a5568; font-size: 1.1rem; margin-bottom: 0.25rem;">
             Demonstrating the usage of AI to mitigate the UHI (Urban Heat Island) effect caused by datacenters
@@ -2695,7 +2686,7 @@ def main():
             <tr>
                 <td><strong>UHI:</strong></td>
                 <td><code>UHII = α × (Q/A) × 1/(1 + β × wind)</code></td>
-                <td style="color: #666;">Physics-based model (Oke, 1982)</td>
+                <td style="color: #666;">Physics-based model</td>
             </tr>
             <tr>
                 <td><strong>Carbon:</strong></td>
@@ -4098,28 +4089,5 @@ METRICS SUMMARY:
     
     progress_bar.progress(100, text="✅ Simulation complete!")
     
-    '''# Final conclusion
-    st.markdown("---")
-    st.markdown(f"""
-    <div style="text-align: center; padding: 2rem; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-radius: 12px; margin-top: 2rem;">
-        <h2 style="font-family: 'Source Serif 4', serif; color: #1a1a2e;">🎯 Research Conclusion</h2>
-        <p style="font-family: 'Source Sans 3', sans-serif; font-size: 1.1rem; color: #333; max-width: 800px; margin: 0 auto;">
-            <strong>The Cold DC Concentration Problem</strong> demonstrates that naive energy-only 
-            optimization defeats sustainability goals by creating severe localized thermal impacts. 
-            Multi-objective routing reduces UHI effects by <strong>{uhi_reduction:.0f}%</strong> while accepting only 
-            <strong>{energy_overhead:.1f}%</strong> energy overhead — a worthwhile trade-off for true sustainability.
-        </p>
-        <p style="font-family: 'Source Sans 3', sans-serif; color: #666; margin-top: 1rem; font-style: italic;">
-            "Cooling technology moves heat from datacenter interior to exterior. 
-            The heat doesn't disappear — it dissipates locally."
-        </p>
-    </div>
-    """, unsafe_allow_html=True)'''
-
-
-# ============================================================================
-# ENTRY POINT
-# ============================================================================
-
 if __name__ == "__main__":
     main()
