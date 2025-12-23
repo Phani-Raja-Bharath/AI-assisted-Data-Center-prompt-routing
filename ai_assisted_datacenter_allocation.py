@@ -2677,7 +2677,7 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-   ''' # Key Formulas
+    # Key Formulas
     st.markdown("""
     <div class="info-box" style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-left: 4px solid #2563eb;">
         <strong>📐 Key Formulas Used:</strong>
@@ -2704,7 +2704,7 @@ def main():
             </tr>
         </table>
     </div>
-    """, unsafe_allow_html=True)'''
+    """, unsafe_allow_html=True)
     
     # ========================================================================
     # SECTION 1: EXPERIMENTAL SETUP
@@ -4098,10 +4098,10 @@ METRICS SUMMARY:
     
     progress_bar.progress(100, text="✅ Simulation complete!")
     
-    """# Final conclusion
+    '''# Final conclusion
     st.markdown("---")
     st.markdown(f"""
-    """<div style="text-align: center; padding: 2rem; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-radius: 12px; margin-top: 2rem;">
+    <div style="text-align: center; padding: 2rem; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-radius: 12px; margin-top: 2rem;">
         <h2 style="font-family: 'Source Serif 4', serif; color: #1a1a2e;">🎯 Research Conclusion</h2>
         <p style="font-family: 'Source Sans 3', sans-serif; font-size: 1.1rem; color: #333; max-width: 800px; margin: 0 auto;">
             <strong>The Cold DC Concentration Problem</strong> demonstrates that naive energy-only 
@@ -4113,8 +4113,8 @@ METRICS SUMMARY:
             "Cooling technology moves heat from datacenter interior to exterior. 
             The heat doesn't disappear — it dissipates locally."
         </p>
-    </div>"""
-    """, unsafe_allow_html=True)"""
+    </div>
+    """, unsafe_allow_html=True)'''
 
 
 # ============================================================================
