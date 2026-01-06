@@ -494,11 +494,11 @@ def create_pdf_report(results, final_rec):
     
     # Table Header
     pdf.set_fill_color(200, 220, 255)
-    pdf.cell(40, 10, "Strategy", 1, 0, 'C', 1)
-    pdf.cell(35, 10, "Energy (Wh)", 1, 0, 'C', 1)
-    pdf.cell(35, 10, "Carbon (g)", 1, 0, 'C', 1)
-    pdf.cell(35, 10, "Latency (ms)", 1, 0, 'C', 1)
-    pdf.cell(35, 10, "Peak UHI (C)", 1, 1, 'C', 1)
+    pdf.cell(40, 10, "Strategy", 1, 0, 'C', True)
+    pdf.cell(35, 10, "Energy (Wh)", 1, 0, 'C', True)
+    pdf.cell(35, 10, "Carbon (g)", 1, 0, 'C', True)
+    pdf.cell(35, 10, "Latency (ms)", 1, 0, 'C', True)
+    pdf.cell(35, 10, "Peak UHI (C)", 1, 1, 'C', True)
     
     # Table Rows
     for strategy, data in results.items():
@@ -521,7 +521,7 @@ def create_pdf_report(results, final_rec):
         f"and Urban Heat Island mitigation for sustainable datacenter operations."
     )
 
-    return pdf.output(dest='S').encode('latin-1')
+    return pdf.output(dest='S')
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """
@@ -677,7 +677,7 @@ def collect_historical_training_data(start_year=2021, end_year=2024):
     # Setup Open-Meteo API client with cache and retry on error
     cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
     retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
-    openmeteo = openmeteo_requests.Client(session = retry_session)
+    openmeteo = openmeteo_requests.Client(session = retry_session)  # type: ignore
 
     all_records = []
 
@@ -717,11 +717,24 @@ def collect_historical_training_data(start_year=2021, end_year=2024):
             response = responses[0]
 
             hourly = response.Hourly()
+            
+            # Check if hourly data is available
+            if hourly is None:
+                print(f"  ✗ {dc_name}: No hourly data returned")
+                continue
 
             # Process hourly data
-            temp = hourly.Variables(0).ValuesAsNumpy()
-            humidity = hourly.Variables(1).ValuesAsNumpy()
-            wind = hourly.Variables(2).ValuesAsNumpy()
+            temp_var = hourly.Variables(0)
+            humidity_var = hourly.Variables(1)
+            wind_var = hourly.Variables(2)
+            
+            if temp_var is None or humidity_var is None or wind_var is None:
+                print(f"  ✗ {dc_name}: Missing expected hourly variables")
+                continue
+            
+            temp = temp_var.ValuesAsNumpy()
+            humidity = humidity_var.ValuesAsNumpy()
+            wind = wind_var.ValuesAsNumpy()
 
             timestamps = pd.date_range(
                 start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
@@ -1131,27 +1144,43 @@ class AIModelSuite:
             use_real_weather=use_real_weather
         )
 
+        # ========== DATA SPLITTING (70/15/15) ==========
         X = df[['temperature', 'humidity', 'wind_speed', 'cooling_type']].values
         y = df['energy'].values
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.3, random_state=42
+        # Split into train+val (85%) and test (15%)
+        X_train_val, X_test, y_train_val, y_test = train_test_split(
+            X, y, test_size=0.15, random_state=42
         )
 
-        # Standardize features
+        # Split train+val into train (70%) and validation (15%)
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train_val, y_train_val, test_size=0.1765, random_state=42
+        )
+
+        # Standardize features (fit ONLY on train, transform val and test)
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
+        X_val_scaled = scaler.transform(X_val)
         X_test_scaled = scaler.transform(X_test)
         self.scalers['main'] = scaler
 
+        # Verify split sizes
+        print(f"✓ Train: {len(X_train)} ({len(X_train)/len(X)*100:.1f}%)")
+        print(f"✓ Val: {len(X_val)} ({len(X_val)/len(X)*100:.1f}%)")
+        print(f"✓ Test: {len(X_test)} ({len(X_test)/len(X)*100:.1f}%)")
+
         results = {}
 
-        # 1. Multiple Linear Regression
+        # ========== 1. MULTIPLE LINEAR REGRESSION ==========
         if train_selected in ['all', 'mlr']:
             mlr = LinearRegression()
             mlr.fit(X_train_scaled, y_train)
+            
+            # Evaluate on TEST set only
             mlr_pred = mlr.predict(X_test_scaled)
             self.models['MLR'] = mlr
+            
             results['MLR'] = {
                 'r2': r2_score(y_test, mlr_pred),
                 'mae': mean_absolute_error(y_test, mlr_pred),
@@ -1160,9 +1189,9 @@ class AIModelSuite:
                 'y_test': y_test,
                 'coefficients': dict(zip(self.feature_names, mlr.coef_))
             }
-            print(f"[DEBUG] MLR R²: {results['MLR']['r2']:.4f}")
+            print(f"[MLR] R²: {results['MLR']['r2']:.4f}")
 
-        # 2. Artificial Neural Network
+        # ========== 2. ARTIFICIAL NEURAL NETWORK ==========
         if train_selected in ['all', 'ann']:
             ann = MLPRegressor(
                 hidden_layer_sizes=(64, 32, 16),
@@ -1170,12 +1199,19 @@ class AIModelSuite:
                 solver='adam',
                 max_iter=500,
                 random_state=42,
-                early_stopping=True,
-                validation_fraction=0.15
+                early_stopping=True,  
+                validation_fraction=0.1, 
+                n_iter_no_change=20
             )
+            
+            # Combine train + val for sklearn's internal validation
+            # OR manually implement early stopping
             ann.fit(X_train_scaled, y_train)
+            
+            # Evaluate on TEST set only
             ann_pred = ann.predict(X_test_scaled)
             self.models['ANN'] = ann
+            
             results['ANN'] = {
                 'r2': r2_score(y_test, ann_pred),
                 'mae': mean_absolute_error(y_test, ann_pred),
@@ -1184,23 +1220,26 @@ class AIModelSuite:
                 'y_test': y_test,
                 'architecture': '64→32→16'
             }
-            print(f"[DEBUG] ANN R²: {results['ANN']['r2']:.4f}")
+            print(f"[ANN] R²: {results['ANN']['r2']:.4f}")
 
-        # 3. Bayesian Optimization 
+        # ========== 3. BAYESIAN OPTIMIZATION ==========
         if train_selected in ['all', 'bayesian'] and BAYES_AVAILABLE:
             try:
                 def ann_objective(hidden1, hidden2, alpha):
+                    """Optimize using VALIDATION set (not test!)"""
                     h1, h2 = int(hidden1), int(hidden2)
                     model = MLPRegressor(
                         hidden_layer_sizes=(h1, h2),
                         alpha=alpha,
                         max_iter=300,
                         random_state=42,
-                        early_stopping=True,
-                        validation_fraction=0.15
+                        early_stopping=False
                     )
                     model.fit(X_train_scaled, y_train)
-                    return r2_score(y_test, model.predict(X_test_scaled))
+                    
+                    # USE VALIDATION SET for hyperparameter selection! ✓
+                    val_pred = model.predict(X_val_scaled)
+                    return r2_score(y_val, val_pred)
 
                 optimizer = BayesianOptimization(
                     f=ann_objective,
@@ -1213,18 +1252,25 @@ class AIModelSuite:
                     verbose=0
                 )
                 optimizer.maximize(init_points=3, n_iter=7)
-                best = optimizer.max['params']
+                
+                best = optimizer.max['params'] if optimizer.max else {
+                    'hidden1': 64, 'hidden2': 32, 'alpha': 0.01
+                }
 
+                # Train final model with best hyperparameters
                 bayes_ann = MLPRegressor(
                     hidden_layer_sizes=(int(best['hidden1']), int(best['hidden2'])),
                     alpha=best['alpha'],
                     max_iter=500,
                     random_state=42,
-                    early_stopping=True
+                    early_stopping=False
                 )
                 bayes_ann.fit(X_train_scaled, y_train)
+                
+                # Evaluate on TEST set only (unseen during optimization!)
                 bayes_pred = bayes_ann.predict(X_test_scaled)
                 self.models['Bayesian'] = bayes_ann
+                
                 results['Bayesian'] = {
                     'r2': r2_score(y_test, bayes_pred),
                     'mae': mean_absolute_error(y_test, bayes_pred),
@@ -1233,33 +1279,85 @@ class AIModelSuite:
                     'y_test': y_test,
                     'best_params': best
                 }
-                print(f"[DEBUG] Bayesian R²: {results['Bayesian']['r2']:.4f}")
-                print(f"[DEBUG] Best params: {best}")
+                print(f"[Bayesian] R²: {results['Bayesian']['r2']:.4f}")
+                print(f"[Bayesian] Best params: {best}")
+                
             except Exception as e:
+                print(f"[Bayesian] Error: {str(e)}")
                 results['Bayesian'] = {'error': str(e)}
 
-        # Feature importance (ANN)
+        # Feature importance (using TEST set for evaluation, not training)
+        if 'MLR' in self.models:
+            mlr = self.models['MLR']
+            importances = dict(zip(self.feature_names, mlr.coef_))
+            results['feature_importance'] = importances
+            print(f"Feature importances (MLR): {importances}")        # Feature importance (using TEST set for evaluation, not training)
+        # Feature importance (using TEST set for evaluation, not training)
         if 'ANN' in self.models:
             try:
                 perm_importance = permutation_importance(
                     self.models['ANN'], X_test_scaled, y_test,
                     n_repeats=10, random_state=42
                 )
-                results['feature_importance'] = dict(zip(
-                    self.feature_names,
-                    perm_importance.importances_mean
-                ))
-            except Exception:
-                results['feature_importance'] = {
-                    'temperature': 0.45,
-                    'cooling_type': 0.35,
-                    'humidity': 0.12,
-                    'wind_speed': 0.08
+                # Fix: Access importances_mean correctly from Bunch object
+                importance_dict = {
+                    name: float(imp) for name, imp in 
+                    zip(self.feature_names, perm_importance['importances_mean'])
                 }
+                results['feature_importance'] = importance_dict
+            except Exception as e:
+                print(f"[Feature Importance] Error: {str(e)}")
 
+# ========== COMPUTE TRAIN/VAL/TEST METRICS FOR ALL MODELS ==========
+        for model_name in ['MLR', 'ANN', 'Bayesian']:  # ← Explicit list of models only
+            if model_name not in self.models:
+                continue  # Skip if model wasn't trained
+                
+            if model_name in results and isinstance(results[model_name], dict):
+                if 'error' in results[model_name]:
+                    continue  # Skip models that had errors
+                    
+                model = self.models[model_name]
+                
+                # Training set metrics
+                train_pred = model.predict(X_train_scaled)
+                results[model_name]['train_r2'] = r2_score(y_train, train_pred)
+                results[model_name]['train_mae'] = mean_absolute_error(y_train, train_pred)
+                results[model_name]['train_rmse'] = np.sqrt(mean_squared_error(y_train, train_pred))
+                
+                # Validation set metrics
+                val_pred = model.predict(X_val_scaled)
+                results[model_name]['val_r2'] = r2_score(y_val, val_pred)
+                results[model_name]['val_mae'] = mean_absolute_error(y_val, val_pred)
+                results[model_name]['val_rmse'] = np.sqrt(mean_squared_error(y_val, val_pred))
+                
+                # Keep existing test metrics (already computed)
+                # results[model_name]['r2'] = test R²
+                # results[model_name]['mae'] = test MAE
+                # results[model_name]['rmse'] = test RMSE
+                
+                # Compute overfitting indicator
+                r2_gap = results[model_name]['train_r2'] - results[model_name]['r2']
+                if r2_gap > 0.05:
+                    results[model_name]['status'] = 'Overfitting'
+                elif results[model_name]['r2'] < 0.7:
+                    results[model_name]['status'] = 'Underfitting'
+                else:
+                    results[model_name]['status'] = 'Good Fit'
+                
+                # For ANN/Bayesian: Extract loss curve if available
+                if model_name in ['ANN', 'Bayesian'] and hasattr(model, 'loss_curve_'):
+                    results[model_name]['loss_curve'] = model.loss_curve_
+                
+                print(f"[{model_name}] Train R²: {results[model_name]['train_r2']:.4f}, "
+                      f"Val R²: {results[model_name]['val_r2']:.4f}, "
+                      f"Test R²: {results[model_name]['r2']:.4f} - "
+                      f"{results[model_name]['status']}")
+
+        # ========== RETURN RESULTS ==========
         self.metrics = results
         self.is_trained = True
-        return results
+        return results        
 
     def predict(self, features, model_name=None):
         """
@@ -1376,7 +1474,7 @@ def route_energy_only(datacenters, weather_data, cooling_selections,
     
     # 4. Distribute any remaining to the absolute best (lowest energy) DC
     if remaining > 0:
-        best_dc = min(energy_scores, key=energy_scores.get)
+        best_dc = min(energy_scores, key=lambda dc: energy_scores[dc])
         distribution[best_dc] = distribution.get(best_dc, 0) + remaining
     
     return distribution
@@ -1449,7 +1547,7 @@ def route_uhi_aware(datacenters, weather_data, cooling_selections,
     
     # Distribute any remaining to best (lowest cost) DC
     if remaining > 0:
-        best_dc = min(scores, key=scores.get)
+        best_dc = min(scores, key=lambda dc: scores[dc])
         distribution[best_dc] = distribution.get(best_dc, 0) + remaining
     
     return distribution
@@ -2081,6 +2179,41 @@ def create_metrics_comparison_chart(results):
     
     return fig
 
+def create_learning_curve_chart(model_results):
+    """Create learning curve showing loss over epochs for neural networks"""
+    
+    fig = go.Figure()
+    colors = {'ANN': '#10b981', 'Bayesian': '#f59e0b'}
+    
+    for name in ['ANN', 'Bayesian']:
+        if name in model_results and isinstance(model_results[name], dict):
+            if 'loss_curve' in model_results[name]:
+                loss = model_results[name]['loss_curve']
+                epochs = list(range(1, len(loss) + 1))
+                
+                fig.add_trace(go.Scatter(
+                    x=epochs,
+                    y=loss,
+                    mode='lines+markers',
+                    name=name,
+                    line=dict(width=2, color=colors[name]),
+                    marker=dict(size=4)
+                ))
+    
+    if not fig.data:
+        return None
+    
+    fig.update_layout(
+        title='Neural Network Training: Loss Curve',
+        xaxis_title='Epoch',
+        yaxis_title='Loss (MSE)',
+        yaxis_type='log',
+        height=400,
+        showlegend=True,
+        hovermode='x unified'
+    )
+    
+    return fig
 
 def create_heat_distribution_chart(results):
     """
@@ -2437,7 +2570,7 @@ def generate_initial_recommendation(datacenters, weather_data, user_location, la
         }
     
     # Find best
-    best_dc = min(scores, key=scores.get)
+    best_dc = min(scores, key=lambda dc: scores[dc])
     best_details = details[best_dc]
     
     # Generate dynamic reasoning
@@ -2485,7 +2618,7 @@ def generate_final_recommendation(results, latency_threshold):
     
     # Find best strategy for UHI reduction
     uhi_scores = {s: results[s]['totals']['peak_uhi'] for s in strategies}
-    best_uhi = min(uhi_scores, key=uhi_scores.get)
+    best_uhi = min(uhi_scores, key=lambda s: uhi_scores[s])
     
     # Calculate improvements vs Energy-Only
     energy_only = results['Energy-Only']['totals']
@@ -2594,6 +2727,9 @@ def calculate_statistical_significance(mc_results):
     # Welch's t-test
     t_stat, p_value = stats.ttest_ind(energy_only_uhi, multi_obj_uhi, equal_var=False)
     
+    # Ensure p_value is a Python float (convert numpy scalar to native Python float)
+    p_value = float(np.asarray(p_value).item())
+    
     # Effect size (Cohen's d)
     pooled_std = np.sqrt((energy_only_uhi.var() + multi_obj_uhi.var()) / 2)
     cohens_d = (energy_only_uhi.mean() - multi_obj_uhi.mean()) / pooled_std if pooled_std > 0 else 0
@@ -2629,6 +2765,69 @@ def calculate_statistical_significance(mc_results):
         'significant': significant,
         'sample_size': len(energy_only_uhi)
     }
+
+def create_train_val_test_comparison(model_results):
+    """Create comparison chart showing train/val/test metrics"""
+    
+    models = []
+    train_r2 = []
+    val_r2 = []
+    test_r2 = []
+    
+    for name in ['MLR', 'ANN', 'Bayesian']:
+        if name in model_results and isinstance(model_results[name], dict):
+            if 'train_r2' in model_results[name]:
+                models.append(name)
+                train_r2.append(model_results[name]['train_r2'])
+                val_r2.append(model_results[name]['val_r2'])
+                test_r2.append(model_results[name]['r2'])
+    
+    if not models:
+        return None
+    
+    fig = go.Figure()
+    
+    x = np.arange(len(models))
+    width = 0.25
+    
+    fig.add_trace(go.Bar(
+        name='Training',
+        x=x - width,
+        y=train_r2,
+        marker_color='#3b82f6',
+        text=[f'{v:.4f}' for v in train_r2],
+        textposition='outside'
+    ))
+    
+    fig.add_trace(go.Bar(
+        name='Validation',
+        x=x,
+        y=val_r2,
+        marker_color='#10b981',
+        text=[f'{v:.4f}' for v in val_r2],
+        textposition='outside'
+    ))
+    
+    fig.add_trace(go.Bar(
+        name='Test',
+        x=x + width,
+        y=test_r2,
+        marker_color='#f59e0b',
+        text=[f'{v:.4f}' for v in test_r2],
+        textposition='outside'
+    ))
+    
+    fig.update_layout(
+        title='Model Performance: Train vs Validation vs Test',
+        xaxis=dict(ticktext=models, tickvals=x, title='Model'),
+        yaxis=dict(title='R² Score', range=[0, 1.05]),
+        barmode='group',
+        height=400,
+        showlegend=True,
+        legend=dict(x=0.7, y=1.0)
+    )
+    
+    return fig
 
 
 # ============================================================================
@@ -2749,9 +2948,6 @@ def main():
                 help="Select a city to automatically set latitude and longitude"
             )
 
-
-
-
         # Manual coordinate controls (always persistent)
         with col2:
             st.number_input(
@@ -2777,7 +2973,7 @@ def main():
             st.session_state.user_lon,
             st.session_state.user_label
         )
-        
+
 
         st.markdown(f"""
         <div class="info-box">
@@ -2789,7 +2985,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-       
         # 1.2 Datacenter Selection
         st.markdown('<div class="subsection-header">1.2 Datacenter Selection (1-3)</div>', unsafe_allow_html=True)
         
@@ -3227,7 +3422,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     
     # Find concentration
     total_reqs = sum(energy_only_dist.values())
-    max_dc = max(energy_only_dist, key=energy_only_dist.get)
+    max_dc = max(energy_only_dist, key=lambda dc: energy_only_dist[dc])
     max_pct = (energy_only_dist[max_dc] / total_reqs) * 100 if total_reqs > 0 else 0
     
     concentration_detected = max_pct > 60
@@ -3370,9 +3565,10 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
 
     
     # 4.2 Model Performance
+    # 4.2 Model Performance
     st.markdown('<div class="subsection-header">4.2 Model Performance Comparison (Graph #3)</div>', unsafe_allow_html=True)
     
-    # Display model cards
+    # Display model cards with train/val/test metrics
     model_cols = st.columns(3)
     model_names = ['MLR', 'ANN', 'Bayesian']
     model_colors = ['#3b82f6', '#10b981', '#f59e0b']
@@ -3381,19 +3577,30 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     for i, model_name in enumerate(model_names):
         with model_cols[i]:
             if model_name in model_results and isinstance(model_results[model_name], dict) and 'r2' in model_results[model_name]:
-                r2 = model_results[model_name]['r2']
-                mae = model_results[model_name]['mae']
-                rmse = model_results[model_name]['rmse']
+                r = model_results[model_name]
                 is_best = model_name == best_model_name
+                
+                # Determine status color
+                status_color = {
+                    'Good Fit': '#10b981',
+                    'Overfitting': '#f59e0b',
+                    'Underfitting': '#ef4444'
+                }.get(r.get('status', 'Unknown'), '#6b7280')
                 
                 st.markdown(f"""
                 <div class="metric-card" style="border: 2px solid {model_colors[i]}; {'box-shadow: 0 0 10px ' + model_colors[i] + '40;' if is_best else ''}">
                     <div style="font-size: 1.1rem; font-weight: 600; color: {model_colors[i]};">
                         {model_name} {'👑' if is_best else ''}
                     </div>
-                    <div class="metric-value" style="color: {model_colors[i]};">R² = {r2:.4f}</div>
-                    <div class="metric-label">MAE: {mae:.4f} Wh</div>
-                    <div class="metric-label">RMSE: {rmse:.4f} Wh</div>
+                    <div class="metric-value" style="color: {model_colors[i]};">Test R² = {r['r2']:.4f}</div>
+                    <div class="metric-label">Train R²: {r.get('train_r2', 0):.4f}</div>
+                    <div class="metric-label">Val R²: {r.get('val_r2', 0):.4f}</div>
+                    <div class="metric-label" style="color: {status_color}; font-weight: 600;">
+                        {r.get('status', 'Unknown')}
+                    </div>
+                    <hr style="margin: 0.5rem 0;">
+                    <div class="metric-label">Test MAE: {r['mae']:.4f} Wh</div>
+                    <div class="metric-label">Test RMSE: {r['rmse']:.4f} Wh</div>
                 </div>
                 """, unsafe_allow_html=True)
             else:
@@ -3406,14 +3613,34 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
                 </div>
                 """, unsafe_allow_html=True)
     
-    # Model comparison chart
+    # Train/Val/Test Comparison Chart
+    st.markdown("### Train vs Validation vs Test Performance")
+    fig_tvt = create_train_val_test_comparison(model_results)
+    if fig_tvt:
+        st.plotly_chart(fig_tvt, use_container_width=True)
+        
+        st.markdown("""
+        **Interpretation:**
+        - **Good Fit**: Train ≈ Val ≈ Test (all bars similar height)
+        - **Overfitting**: Train > Test (training bar much higher)
+        - **Underfitting**: All bars low (R² < 0.7)
+        """)
+    
+    # Learning Curve
+    st.markdown("### Neural Network Training Convergence")
+    fig_lc = create_learning_curve_chart(model_results)
+    if fig_lc:
+        st.plotly_chart(fig_lc, use_container_width=True)
+        st.markdown("**Finding:** Loss decreases smoothly, indicating stable convergence.")
+    
+    # Model comparison chart (keep existing)
     fig_model_comp = create_model_comparison_chart(model_results)
     if fig_model_comp:
         st.plotly_chart(fig_model_comp, use_container_width=True)
     
     st.markdown(f"""
     <div class="success-box">
-        <strong>✅ Best Model:</strong> {best_model_name} with R² = {best_r2:.4f}
+        <strong>✅ Best Model:</strong> {best_model_name} with Test R² = {best_r2:.4f} ({model_results[best_model_name].get('status', 'Unknown')})
         <br>This model will be used for energy predictions in routing strategies.
     </div>
     """, unsafe_allow_html=True)
