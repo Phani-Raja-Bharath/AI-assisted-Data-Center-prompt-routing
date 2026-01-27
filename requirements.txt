@@ -14,3 +14,4 @@ retry-requests>=2.0.0
 
 # Optional - for Bayesian Optimization
 bayesian-optimization>=1.4.0
+kaleido>=1.2.0

@@ -1,13 +1,3 @@
-"""
-================================================================================
-AI-ASSISTED DATACENTER ROUTING FOR UHI MITIGATION
-Research Contribution:
-- Data center created UHI mitigation problem identification
-- Multi-objective routing with UHI mitigation
-- Statistical validation through Monte Carlo simulation
-================================================================================
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -23,13 +13,17 @@ from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.inspection import permutation_importance
+from sklearn.base import clone
 from scipy import stats
-import io
-import base64
+import joblib, os
+import plotly.io as pio
+from io import BytesIO
+import hashlib, json
 import logging
 import openmeteo_requests
 import requests_cache
 from retry_requests import retry
+from typing import Any
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -54,198 +48,257 @@ try:
 except ImportError:
     FPDF_AVAILABLE = False
 
+from pathlib import Path
+
+ARTIFACT_DIR = Path(__file__).parent / "artifacts"
+ARTIFACT_DIR.mkdir(exist_ok=True)
+MODEL_BUNDLE_PATH = ARTIFACT_DIR / "ai_models_bundle.joblib"
+
+PLOTLY_CONFIG = {
+    "responsive": True,          # Make Plotly react to container resize
+    "displaylogo": False,        # Hide Plotly logo
+    "displayModeBar": True,      # Show/hide toolbar; set to "hover" if you prefer
+    "scrollZoom": True,          # Allow mousewheel zoom
+    "doubleClick": "reset",      # double click resets axes
+    "toImageButtonOptions": {    # export settings
+        "format": "png",
+        "scale": 4,              # higher = sharper export (increased for PDF quality)
+        "width": 1920,
+        "height": 1080,
+    },
+    # Optional: remove noisy buttons
+    "modeBarButtonsToRemove": [
+        "lasso2d", "select2d",
+        "autoScale2d", "toggleSpikelines"
+    ],
+}
+
+PLOTLY_CONFIG_CLEAN = {**PLOTLY_CONFIG, "displayModeBar": False}
+PLOTLY_CONFIG_DEFAULT = {**PLOTLY_CONFIG, "displayModeBar": True}
+
+FIG_EXPORT_PRESETS = {
+    # High-quality paper-friendly sizes (pixels) with higher scale for better clarity
+    "Paper: single-column (3.5in @300dpi)": {"width": 1050, "height": 650, "scale": 3},
+    "Paper: double-column (7.2in @300dpi)": {"width": 2160, "height": 1200, "scale": 3},
+    "Paper: portrait figure (3.5in wide, tall)": {"width": 1050, "height": 1200, "scale": 3},
+
+    # High-resolution exports for presentations and posters
+    "Presentation (1920x1080)": {"width": 1920, "height": 1080, "scale": 3},
+    "High-res Export (4K)": {"width": 3840, "height": 2160, "scale": 2},
+
+    # Full-page exports with enhanced quality
+    "A4 Portrait @300dpi": {"width": 2480, "height": 3508, "scale": 2},
+    "A4 Landscape @300dpi": {"width": 3508, "height": 2480, "scale": 2},
+}
+
+
+# ============================================================================
+# FIGURE EXPORT HELPERS (publication-quality downloads)
+# ============================================================================
+
+def _fig_to_image_bytes(fig, fmt="png", scale=4, width=None, height=None):
+    """Convert a Plotly figure to image bytes with high quality (requires kaleido)."""
+    try:
+        return pio.to_image(fig, format=fmt, scale=scale, width=width, height=height)
+    except Exception:
+        return None
+
+def st_figure_downloads(fig, base_name, preset=None, width=None, height=None, scale=None):
+    default_cfg = FIG_EXPORT_PRESETS["Paper: single-column (3.5in @300dpi)"]
+    # Ensure the key is always a string and not a conditional expression
+    if "fig_export_cfg" in st.session_state:
+        export_cfg = st.session_state.get("fig_export_cfg", FIG_EXPORT_PRESETS.get("Paper: single-column (3.5in @300dpi)"))
+    else:
+        export_cfg = FIG_EXPORT_PRESETS.get("Paper: single-column (3.5in @300dpi)")
+    cfg = FIG_EXPORT_PRESETS.get(preset if isinstance(preset, str) and preset else "Paper: single-column (3.5in @300dpi)", export_cfg)
+    
+    if cfg is None:
+        cfg = default_cfg
+
+    w = width or cfg["width"]
+    h = height or cfg["height"]
+    sc = scale or cfg.get("scale", 1)
+
+    png = _fig_to_image_bytes(fig, fmt="png", scale=sc, width=w, height=h)
+    if png is None:
+        st.info("Figure export needs 'kaleido'. Install: pip install -U kaleido")
+        return
+
+    st.download_button("⬇️ Download PNG (paper-ready)", png, file_name=f"{base_name}.png", mime="image/png")
+
+    pdf = _fig_to_image_bytes(fig, fmt="pdf", scale=1, width=w, height=h)
+    if pdf is not None:
+        st.download_button("⬇️ Download PDF (vector)", pdf, file_name=f"{base_name}.pdf", mime="application/pdf")
+
 # ============================================================================
 # PAGE CONFIGURATION
 # ============================================================================
 
 st.set_page_config(
-    page_title="AI-Assisted UHI Mitigation Dashboard",
+    page_title="CLIMATE-AWARE SURROGATE MODELING FOR ENERGY-EFFICIENT DATA CENTER WORKLOAD ROUTING",
     page_icon="🌡️",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
+st.markdown("""
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Source+Serif+4:wght@600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+""", unsafe_allow_html=True)
+
 # ============================================================================
-# CUSTOM CSS - Academic Research Theme
+# CSS STYLING
 # ============================================================================
 
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600;700&family=Source+Sans+3:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
-    
-    .main .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
-        max-width: 1400px;
-    }
-    
-    .section-header {
-        font-family: 'Source Serif 4', Georgia, serif;
-        font-size: 1.6rem;
-        font-weight: 700;
-        color: #1a1a2e;
-        margin: 2rem 0 1rem 0;
-        padding: 0.75rem 1rem;
-        background: linear-gradient(90deg, #f8f9fa 0%, #ffffff 100%);
-        border-left: 4px solid #e94560;
-        border-radius: 0 8px 8px 0;
-    }
-    
-    .subsection-header {
-        font-family: 'Source Sans 3', sans-serif;
-        font-size: 1.1rem;
-        font-weight: 600;
-        color: #2d3748;
-        margin: 1.5rem 0 0.75rem 0;
-        padding-bottom: 0.5rem;
-        border-bottom: 2px solid #e2e8f0;
-    }
-    
-    .physics-callout {
-        background: linear-gradient(135deg, #fef3f3 0%, #fde8e8 100%);
-        border-left: 4px solid #e94560;
-        padding: 1.25rem;
-        margin: 1.5rem 0;
-        border-radius: 0 8px 8px 0;
-        font-family: 'Source Sans 3', sans-serif;
-    }
-    
-    .physics-callout strong {
-        color: #c41e3a;
-    }
-    
-    .info-box {
-        background: #f0f9ff;
-        border: 1px solid #bae6fd;
-        border-radius: 8px;
-        padding: 1rem;
-        margin: 1rem 0;
-        font-family: 'Source Sans 3', sans-serif;
-    }
-    
-    .warning-box {
-        background: #fffbeb;
-        border: 1px solid #fcd34d;
-        border-radius: 8px;
-        padding: 1rem;
-        margin: 1rem 0;
-        font-family: 'Source Sans 3', sans-serif;
-    }
-    
-    .success-box {
-        background: #f0fdf4;
-        border: 1px solid #86efac;
-        border-radius: 8px;
-        padding: 1rem;
-        margin: 1rem 0;
-        font-family: 'Source Sans 3', sans-serif;
-    }
-    
-    .metric-card {
-        background: white;
-        border-radius: 12px;
-        padding: 1.25rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        border: 1px solid #e5e7eb;
-        text-align: center;
-        transition: transform 0.2s ease;
-    }
-    
-    .metric-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.12);
-    }
-    
-    .metric-value {
-        font-family: 'Source Serif 4', serif;
-        font-size: 1.75rem;
-        font-weight: 700;
-        color: #1a1a2e;
-    }
-    
-    .metric-label {
-        font-family: 'Source Sans 3', sans-serif;
-        font-size: 0.875rem;
-        color: #6b7280;
-        margin-top: 0.25rem;
-    }
-    
-    .dc-card {
-        background: white;
-        border-radius: 10px;
-        padding: 1rem;
-        margin: 0.5rem 0;
-        border: 2px solid #e5e7eb;
-        transition: all 0.2s ease;
-    }
-    
-    .dc-card:hover {
-        border-color: #e94560;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    }
-    
-    .dc-card.hot { border-left: 4px solid #dc2626; }
-    .dc-card.moderate { border-left: 4px solid #d97706; }
-    .dc-card.cold { border-left: 4px solid #2563eb; }
-    
-    .finding-card {
-        background: white;
-        border-radius: 12px;
-        padding: 1.5rem;
-        margin: 1rem 0;
-        border: 1px solid #e5e7eb;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-    }
-    
-    .finding-card h4 {
-        font-family: 'Source Serif 4', serif;
-        color: #1a1a2e;
-        margin-bottom: 0.75rem;
-    }
-    
-    .code-text {
-        font-family: 'JetBrains Mono', monospace;
-        background: #f1f5f9;
-        padding: 0.2rem 0.4rem;
-        border-radius: 4px;
-        font-size: 0.9rem;
-    }
-    
-    .stButton > button {
-        font-family: 'Source Sans 3', sans-serif;
-        font-weight: 600;
-        border-radius: 8px;
-        padding: 0.75rem 2rem;
-        transition: all 0.2s ease;
-    }
-    
-    .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #e94560 0%, #c41e3a 100%);
-        border: none;
-        color: white;
-    }
-    
-    .stButton > button[kind="primary"]:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(233, 69, 96, 0.3);
-    }
-    
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    .reference-box {
-        background: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-        padding: 1rem;
-        margin: 0.75rem 0;
-        font-family: 'Source Sans 3', sans-serif;
-        font-size: 0.9rem;
-    }
-    
-    .reference-box strong {
-        color: #1e40af;
-    }
+/* ---------- Design tokens ---------- */
+:root{
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --text: #0f172a;
+  --muted: #475569;
+  --border: #e2e8f0;
+  --soft: #f8fafc;
+  --primary: #e94560;
+  --primary2: #c41e3a;
+  --shadow: 0 1px 10px rgba(15, 23, 42, 0.06);
+  --radius: 14px;
+}
+
+/* ---------- App background + typography ---------- */
+html, body, [data-testid="stAppViewContainer"] {
+  background: var(--bg) !important;
+  color: var(--text) !important;
+  font-family: "Source Sans 3", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif !important;
+}
+
+[data-testid="stHeader"], [data-testid="stToolbar"]{
+  background: var(--bg) !important;
+}
+
+.main .block-container{
+  max-width: 1400px;
+  padding-top: 1.25rem;
+  padding-bottom: 2rem;
+}
+
+/* ---------- Headings ---------- */
+.section-header{
+  font-family: "Source Serif 4", Georgia, serif;
+  font-size: 1.55rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 1.8rem 0 1rem 0;
+  padding: 0.85rem 1rem;
+  background: var(--soft);
+  border: 1px solid var(--border);
+  border-left: 5px solid var(--primary);
+  border-radius: 12px;
+}
+
+.subsection-header{
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text);
+  margin: 1.25rem 0 0.75rem 0;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---------- Cards / callouts ---------- */
+.metric-card, .finding-card, .dc-card, .reference-box{
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.metric-card{
+  padding: 1.1rem;
+  text-align: center;
+}
+
+.metric-value{
+  font-family: "Source Serif 4", Georgia, serif;
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.metric-label{
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+.finding-card{ padding: 1.25rem; margin: 1rem 0; }
+.dc-card{ padding: 1rem; margin: 0.6rem 0; }
+
+.dc-card.hot{ border-left: 5px solid #dc2626; }
+.dc-card.moderate{ border-left: 5px solid #d97706; }
+.dc-card.cold{ border-left: 5px solid #2563eb; }
+
+.physics-callout, .info-box, .warning-box, .success-box{
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  margin: 1rem 0;
+  border: 1px solid var(--border);
+  background: var(--soft);
+}
+
+.physics-callout{ border-left: 5px solid var(--primary); }
+.info-box{ border-left: 5px solid #0ea5e9; }
+.warning-box{ border-left: 5px solid #f59e0b; }
+.success-box{ border-left: 5px solid #22c55e; }
+
+/* ---------- Code pills ---------- */
+.code-text{
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: #f1f5f9;
+  padding: 0.18rem 0.45rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+/* ---------- Buttons (Streamlit changed selectors over versions) ---------- */
+/* Primary */
+button[data-testid="baseButton-primary"]{
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary2) 100%) !important;
+  color: #fff !important;
+  border: 0 !important;
+  border-radius: 12px !important;
+  font-weight: 700 !important;
+  padding: 0.7rem 1.2rem !important;
+  box-shadow: 0 6px 18px rgba(233, 69, 96, 0.18) !important;
+}
+button[data-testid="baseButton-primary"]:hover{
+  transform: translateY(-1px);
+  filter: brightness(1.02);
+}
+
+/* Secondary */
+button[data-testid="baseButton-secondary"]{
+  background: #ffffff !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+  font-weight: 700 !important;
+  padding: 0.7rem 1.2rem !important;
+}
+
+/* ---------- Inputs ---------- */
+[data-baseweb="select"] > div,
+.stTextInput input,
+.stNumberInput input{
+  border-radius: 12px !important;
+}
+
+/* Hide Streamlit chrome */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -468,10 +521,16 @@ def create_pdf_report(results, final_rec):
 
     pdf = PDF()
     pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    def pdf_safe_text(text):
+        if not isinstance(text, str):
+            return text
+        return text.encode("latin-1", errors="replace").decode("latin-1")
     
     # Title Info
     pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 0, 1, 'C')
+    pdf.cell(0, 10, pdf_safe_text(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), 0, 1, 'C')
     pdf.ln(10)
 
     # Executive Summary
@@ -484,7 +543,7 @@ def create_pdf_report(results, final_rec):
         f"Reasoning:\n" + 
         "\n".join([f"- {r.replace('✅', '[OK]').replace('⚠️', '[WARN]').replace('❌', '[X]').replace('🌡️', '').replace('🔥', '').replace('⏱️', '').replace('⚡', '')}" for r in final_rec['reasoning']])
     )
-    pdf.multi_cell(0, 7, summary_text)
+    pdf.multi_cell(0, 7, pdf_safe_text(summary_text))
     pdf.ln(10)
 
     # Metrics Comparison
@@ -498,16 +557,16 @@ def create_pdf_report(results, final_rec):
     pdf.cell(35, 10, "Energy (Wh)", 1, 0, 'C', True)
     pdf.cell(35, 10, "Carbon (g)", 1, 0, 'C', True)
     pdf.cell(35, 10, "Latency (ms)", 1, 0, 'C', True)
-    pdf.cell(35, 10, "Peak UHI (C)", 1, 1, 'C', True)
+    pdf.cell(35, 10, "Peak ΔT-AR (C)", 1, 1, 'C', True)
     
     # Table Rows
     for strategy, data in results.items():
         totals = data['totals']
-        pdf.cell(40, 10, strategy, 1)
+        pdf.cell(40, 10, pdf_safe_text(strategy), 1)
         pdf.cell(35, 10, f"{totals['energy_wh']:.1f}", 1)
         pdf.cell(35, 10, f"{totals['carbon_g']:.1f}", 1)
         pdf.cell(35, 10, f"{totals['avg_latency_ms']:.1f}", 1)
-        pdf.cell(35, 10, f"{totals['peak_uhi']:.4f}", 1, 1)
+        pdf.cell(35, 10, f"{totals['peak_ΔT']:.4f}", 1, 1)
     
     pdf.ln(10)
     
@@ -515,13 +574,17 @@ def create_pdf_report(results, final_rec):
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(0, 10, "3. Conclusion", 0, 1)
     pdf.set_font("Arial", size=11)
-    pdf.multi_cell(0, 7, 
+    conclusion_text = (
         f"The {final_rec['recommended_strategy']} routing strategy is recommended based on "
         f"the analysis. This approach balances energy efficiency, latency, carbon emissions, "
-        f"and Urban Heat Island mitigation for sustainable datacenter operations."
+        f"and Delta-T Aware Routing mitigation for sustainable datacenter operations."
     )
+    pdf.multi_cell(0, 7, pdf_safe_text(conclusion_text))
 
-    return pdf.output(dest='S')
+    pdf_output = pdf.output(dest='S')
+    if isinstance(pdf_output, str):
+        pdf_output = pdf_output.encode("latin-1", errors="replace")
+    return pdf_output
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """
@@ -536,68 +599,120 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return 2 * R * np.arcsin(np.sqrt(a))
 
 
-def calculate_latency(distance_km, load_fraction=0.5):
+def calculate_latency(distance_km, load_fraction=0.5, service_rate=1000, processing_ms=30,
+                      fiber_speed_km_s=200000, max_queue_ms=200, utilization_cap=0.99):
     """
-    Calculate network latency using propagation delay + M/M/1 queueing model.
-    
-    Components:
-    - Propagation: distance / speed of light in fiber (~200,000 km/s)
-    - Queueing: M/M/1 model based on load
-    - Processing: Base server processing time
+    Latency proxy = propagation + M/M/1 queueing + processing.
+
+    - Propagation: round-trip distance / fiber speed
+    - Queueing: M/M/1 with utilization ρ = λ/μ, bounded for stability
+    - Processing: constant baseline
     """
-    # Propagation delay (round trip)
-    speed_of_light_fiber = 200000  # km/s
-    propagation_ms = (distance_km / speed_of_light_fiber) * 1000 * 2
-    
-    # M/M/1 queueing delay
-    service_rate = 1000  # requests/second
-    arrival_rate = service_rate * min(load_fraction, 0.95) * 0.9
-    
-    if arrival_rate >= service_rate * 0.99:
-        queueing_ms = 200  # Congested
+    # --- Propagation delay (round trip) ---
+    propagation_ms = (float(distance_km) / float(fiber_speed_km_s)) * 1000.0 * 2.0
+
+    # --- Queueing delay (M/M/1) ---
+    # Interpret load_fraction as utilization proxy ρ, then map to λ = ρ * μ
+    rho = max(0.0, min(float(load_fraction), utilization_cap))  # 0 <= ρ < 1
+    mu = float(service_rate)                                   # requests/s
+    lam = rho * mu                                             # requests/s
+
+    # If extremely close to saturation, cap delay at max_queue_ms
+    if lam >= utilization_cap * mu:
+        queueing_ms = float(max_queue_ms)
     else:
-        queueing_ms = min(200, 1000 / max(0.1, service_rate - arrival_rate))
-    
-    # Base processing time
-    processing_ms = 30
-    
-    return propagation_ms + queueing_ms + processing_ms
+        # M/M/1 mean waiting time in queue: Wq = λ / (μ(μ-λ)) seconds
+        # Convert to ms, then cap
+        wq_s = lam / (mu * max(1e-9, (mu - lam)))
+        queueing_ms = min(float(max_queue_ms), wq_s * 1000.0)
+
+    # --- Processing delay ---
+    return propagation_ms + queueing_ms + float(processing_ms)
 
 
-def fetch_weather_data(lat, lon, location_name="Location"):
+
+# One single baseline table (match Table 1)
+CLIMATE_BASELINES = {
+    "cold":     {"temperature": 5.0,  "humidity": 70.0, "wind_speed": 6.0, "pressure": 1013.25, "solar_radiation": 150.0},
+    "moderate": {"temperature": 18.0, "humidity": 55.0, "wind_speed": 4.0, "pressure": 1013.25, "solar_radiation": 200.0},
+    "hot":      {"temperature": 35.0, "humidity": 30.0, "wind_speed": 3.0, "pressure": 1013.25, "solar_radiation": 350.0},
+}
+
+api_fire_count = 0  # prevent NameError
+
+import requests
+import requests_cache
+from typing import Any, cast
+
+def fetch_weather_data(lat: float, lon: float, location_name: str = "Location", climate_hint: str | None = None) -> dict[str, Any]:
     global api_fire_count
-    """
-    Fetch real-time weather from Open-Meteo API.
-    Returns temperature, humidity, and wind speed.
-    """
+
+    lat = float(lat)
+    lon = float(lon)
+
+    # ========== 1) TRY ACTUAL API CALL FIRST ==========
     try:
-        api_fire_count = api_fire_count + 1
-        logging.info(f"API call #{api_fire_count} - Fetching weather for {location_name} at ({lat:.4f}, {lon:.4f})")
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m&timezone=auto"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            current = data.get('current', {})
-            return {
-                'temperature': current.get('temperature_2m', 20.0),
-                'humidity': current.get('relative_humidity_2m', 50.0),
-                'wind_speed': current.get('wind_speed_10m', 5.0),
-                'source': 'Open-Meteo API (Live)',
-                'success': True
-            }
+        api_fire_count += 1
+        logging.info(
+            f"API call #{api_fire_count} - Fetching weather for {location_name} at ({lat:.4f}, {lon:.4f})"
+        )
+
+        cache_session = requests_cache.CachedSession(".cache", expire_after=1800)
+        retry_session = retry(cache_session, retries=3, backoff_factor=0.2)
+
+        # openmeteo_requests.Client type stubs expect niquests.Session
+        session = cast(requests.Session, retry_session)
+        openmeteo = openmeteo_requests.Client(session=session)  # type: ignore[arg-type]
+
+        params: dict[str, Any] = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": [
+                "temperature_2m",
+                "relative_humidity_2m",
+                "wind_speed_10m",
+                "surface_pressure",
+                "shortwave_radiation",
+            ],
+            "timezone": "auto",
+        }
+
+        responses = openmeteo.weather_api("https://api.open-meteo.com/v1/forecast", params=params)
+        response = responses[0]
+        current = response.Current()
+
+        def _safe_current_value(current_data, idx: int, default: float) -> float:
+            var = current_data.Variables(idx) if current_data else None
+            return float(var.Value()) if var else float(default)
+
+        return {
+            "temperature": _safe_current_value(current, 0, 20.0),
+            "humidity": _safe_current_value(current, 1, 50.0),
+            "wind_speed": _safe_current_value(current, 2, 5.0),
+            "pressure": _safe_current_value(current, 3, 1013.25),
+            "solar_radiation": _safe_current_value(current, 4, 200.0),
+            "source": "Open-Meteo API (Live)",
+            "success": True,
+        }
+
     except Exception as e:
         logging.warning(f"API call failed for {location_name}: {str(e)}")
-        pass
 
-    # Fallback to estimated values
+    # ========== 2) FALLBACK ==========
+    climate_key = str(climate_hint).lower() if climate_hint else "moderate"
+    if climate_key.startswith("hot"):
+        climate_key = "hot"
+    elif climate_key.startswith("cold"):
+        climate_key = "cold"
+    elif climate_key.startswith("mod"):
+        climate_key = "moderate"
+
+    base = CLIMATE_BASELINES.get(climate_key, CLIMATE_BASELINES["moderate"])
     return {
-        'temperature': 20.0,
-        'humidity': 50.0,
-        'wind_speed': 5.0,
-        'source': 'Estimated (API unavailable)',
-        'success': False
+        **base,
+        "source": f"Estimated baseline ({climate_key}, API unavailable)",
+        "success": False,
     }
-
 
 def classify_climate(temperature, humidity, wind_speed=None):
     """
@@ -666,13 +781,13 @@ def classify_climate(temperature, humidity, wind_speed=None):
         "emoji": emoji_map.get(climate, "🌍")
     }
 
-def collect_historical_training_data(start_year=2021, end_year=2024):
+def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb=None):
     """
     Fetch 4 years of hourly weather for all datacenters
     using Open-Meteo Historical Forecast API.
     
     Returns a SINGLE combined DataFrame:
-    columns = [location, datetime, temperature, humidity, wind_speed, cooling_type]
+    columns = [location, datetime, temperature, humidity, wind_speed, pressure, solar_radiation, cooling_type]
     """
     # Setup Open-Meteo API client with cache and retry on error
     cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
@@ -708,7 +823,7 @@ def collect_historical_training_data(start_year=2021, end_year=2024):
             "longitude": lon,
             "start_date": start_date,
             "end_date": end_date,
-            "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m",
+            "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,surface_pressure,shortwave_radiation",
             "timezone": "auto"
         }
 
@@ -723,10 +838,12 @@ def collect_historical_training_data(start_year=2021, end_year=2024):
                 print(f"  ✗ {dc_name}: No hourly data returned")
                 continue
 
-            # Process hourly data
+            # Process hourly data (order matches API request)
             temp_var = hourly.Variables(0)
             humidity_var = hourly.Variables(1)
             wind_var = hourly.Variables(2)
+            pressure_var = hourly.Variables(3)
+            solar_var = hourly.Variables(4)
             
             if temp_var is None or humidity_var is None or wind_var is None:
                 print(f"  ✗ {dc_name}: Missing expected hourly variables")
@@ -735,6 +852,8 @@ def collect_historical_training_data(start_year=2021, end_year=2024):
             temp = temp_var.ValuesAsNumpy()
             humidity = humidity_var.ValuesAsNumpy()
             wind = wind_var.ValuesAsNumpy()
+            pressure = pressure_var.ValuesAsNumpy() if pressure_var else np.full(len(temp), 1013.25)
+            solar = solar_var.ValuesAsNumpy() if solar_var else np.full(len(temp), 200.0)
 
             timestamps = pd.date_range(
                 start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
@@ -757,6 +876,8 @@ def collect_historical_training_data(start_year=2021, end_year=2024):
                     float(temp[i]),
                     float(humidity[i]),
                     float(wind[i]),
+                    float(pressure[i]) if not np.isnan(pressure[i]) else 1013.25,
+                    float(solar[i]) if not np.isnan(solar[i]) else 200.0,
                     cooling_type
                 ])
 
@@ -769,6 +890,8 @@ def collect_historical_training_data(start_year=2021, end_year=2024):
         "temperature",
         "humidity",
         "wind_speed",
+        "pressure",
+        "solar_radiation",
         "cooling_type"
     ])
 
@@ -834,7 +957,7 @@ def calculate_energy_per_request(temperature, humidity, cooling_type, energy_mul
     if cooling_type == 'evaporative' and humidity > 60:
         humidity_factor = 1 + 0.005 * (humidity - 60)
     else:
-        humidity_factor = 1 + 0.001 * max(0, humidity - 50)
+        humidity_factor = 1 + 0.001 * abs(humidity - 50)
     
     # Calculate total energy
     total_energy = BASE_ENERGY_WH * pue * temp_factor * humidity_factor * energy_multiplier
@@ -842,27 +965,27 @@ def calculate_energy_per_request(temperature, humidity, cooling_type, energy_mul
     return total_energy
 
 
-def calculate_uhi_contribution(heat_kwh, area_km2=1.0, wind_speed=5.0):
+def calculate_ΔT_contribution(heat_kwh, area_km2=1.0, wind_speed=5.0):
     """
-    Estimate local UHI contribution using physics-based heat flux model.
+    Estimate local ΔT-AR contribution using physics-based heat flux model.
     
-    Formula: ΔT = α × (Q/A) × (1/(1 + β × wind))
+    Formula: ΔT = κ × (Q/A) × (1/(1 + γ × wind))
     
     This model is derived from thermodynamic principles:
     - Heat flux density (Q/A) drives local temperature rise
     - Wind provides convective heat dissipation
     
     Parameters:
-    - α = 0.0012: Heat-to-temperature coefficient (°C per kW/km²)
-    - β = 0.15: Wind dissipation factor
+    - η = 0.0012: Heat-to-temperature coefficient (°C per kW/km²)
+    - γ = 0.15: Wind dissipation factor
     """
-    alpha = 0.0012  # Heat-to-temperature coefficient
-    beta = 0.15     # Wind dissipation factor
+    eta = 0.0012  # Heat-to-temperature coefficient
+    gamma = 0.15     # Wind dissipation factor
     
     heat_flux = heat_kwh / area_km2
-    wind_factor = 1 / (1 + beta * wind_speed)
+    wind_factor = 1 / (1 + gamma * wind_speed)
     
-    return alpha * heat_flux * wind_factor
+    return eta * heat_flux * wind_factor
 
 
 def get_optimal_cooling_for_climate(climate_detail):
@@ -878,99 +1001,60 @@ def get_optimal_cooling_for_climate(climate_detail):
     }
     return recommendations.get(climate_detail, ('air_economizer', "Default recommendation for mixed conditions"))
 
-def collect_training_data(days: int = 7) -> pd.DataFrame: #Intentional unsed 'days' param for API compatibility
-    """
-    Collects a small, real-weather training dataset for AIModelSuite.
-
-    Columns returned:
-    - temperature
-    - humidity
-    - wind_speed
-    - cooling_type   (string: one of COOLING_SYSTEMS keys)
-
-    This uses:
-      - DEFAULT_DATACENTERS
-      - EXTENDED_DC_LOCATIONS
-      - fetch_weather_data()
-      - classify_climate()
-      - get_optimal_cooling_for_climate()
-
-    The 'days' argument is kept for compatibility with generate_training_data(),
-    but in this simple version we just sample current conditions once per site.
-    """
+def collect_training_data(days: int = 7) -> pd.DataFrame:  # kept for compatibility
     records = []
 
-    # 1) Default datacenters (Phoenix, SF, Stockholm, ...)
+    # 1) Default datacenters
     for dc_name, dc_info in DEFAULT_DATACENTERS.items():
         w = fetch_weather_data(dc_info["lat"], dc_info["lon"], dc_name)
-        records.append(
-            {
-                "datacenter": dc_name,
-                "temperature": w["temperature"],
-                "humidity": w["humidity"],
-                "wind_speed": w["wind_speed"],
-                # use the configured default cooling for that DC
-                "cooling_type": dc_info.get("default_cooling", "mechanical_chiller"),
-            }
-        )
+        records.append({
+            "datacenter": dc_name,
+            "temperature": w["temperature"],
+            "humidity": w["humidity"],
+            "wind_speed": w["wind_speed"],
+            "pressure": w.get("pressure", 1013.25),
+            "solar_radiation": w.get("solar_radiation", 200.0),
+            "cooling_type": dc_info.get("default_cooling", "mechanical_chiller"),
+        })
 
-    # 2) Extended locations (Dublin, London, Singapore, etc.)
-    for dc_name, loc in EXTENDED_DC_LOCATIONS.items():
-        w = fetch_weather_data(loc["lat"], loc["lon"], dc_name)
+    # 2) Extended datacenters
+    if EXTENDED_DC_LOCATIONS:
+        with st.spinner(f"🌐 Loading {len(EXTENDED_DC_LOCATIONS)} extended datacenters..."):
+            for dc_name, loc in EXTENDED_DC_LOCATIONS.items():
+                w = fetch_weather_data(loc["lat"], loc["lon"], dc_name)
+                climate_info = classify_climate(w["temperature"], w["humidity"], w.get("wind_speed", 5.0))
+                cooling_key, _ = get_optimal_cooling_for_climate(climate_info["climate_detail"])
 
-        # choose a cooling type based on climate at that moment
-        climate_info = classify_climate(w["temperature"], w["humidity"])
-        cooling_key, _ = get_optimal_cooling_for_climate(climate_info["climate_detail"])
-
-        records.append(
-            {
-                "datacenter": dc_name,
-                "temperature": w["temperature"],
-                "humidity": w["humidity"],
-                "wind_speed": w["wind_speed"],
-                "cooling_type": cooling_key,
-            }
-        )
-
-
-
-    if not records:
-        # If something goes very wrong, return empty so AIModelSuite falls back to synthetic data
-        return pd.DataFrame()
-
+                records.append({
+                    "datacenter": dc_name,
+                    "temperature": w["temperature"],
+                    "humidity": w["humidity"],
+                    "wind_speed": w["wind_speed"],
+                    "pressure": w.get("pressure", 1013.25),
+                    "solar_radiation": w.get("solar_radiation", 200.0),
+                    "cooling_type": cooling_key,
+                })
 
     return pd.DataFrame(records)
 
 
-def apply_capacity_limit(requests, energy_per_request, max_capacity_mw):
+def apply_capacity_limit(requests, energy_per_request_wh, max_capacity_mw, time_window_hours=1.0):
     """
-    Limit the number of requests based on datacenter power capacity.
-    
-    Args:
-        requests: Number of requests allocated to this datacenter
-        energy_per_request: Energy per request in Wh
-        max_capacity_mw: Maximum power capacity in MW
-    
-    Returns:
-        Capped number of requests
+    Limit requests based on DC power capacity over a time window.
+    capacity (MW) -> energy capacity over window (Wh) = MW * 1e6 * hours
     """
-    if requests == 0:
+    if requests <= 0:
         return 0
-    
-    # Convert capacity from MW to Wh (assuming sustained load)
-    # MW = megawatts, need to convert to watt-hours for comparison
-    max_capacity_wh = max_capacity_mw * 1e6  # MW to W
-    
-    # Calculate total energy for requested load
-    total_energy_w = requests * energy_per_request
-    
-    # If within capacity, return as-is
-    if total_energy_w <= max_capacity_wh:
+
+    max_capacity_wh = max_capacity_mw * 1e6 * float(time_window_hours)
+    total_wh = requests * energy_per_request_wh
+
+    if total_wh <= max_capacity_wh:
         return requests
-    
-    # Otherwise, cap to maximum capacity
-    max_requests = int(max_capacity_wh / energy_per_request)
-    return max(1, max_requests)  # Ensure at least 1 request if non-zero input
+
+    max_requests = int(max_capacity_wh / max(energy_per_request_wh, 1e-9))
+    return max(0, max_requests)
+
 
 
 # ============================================================================
@@ -1004,7 +1088,7 @@ def engineer_features(df):
     #    For now, use reasonable defaults — these can be made DC-specific later.
     df["base_capacity_mw"] = 50.0       # assume 50 MW DC
     df["urban_density"] = 0.7           # assume relatively dense urban siting
-    df["carbon_intensity"] = 300.0      # gCO2/kWh, generic grid mix
+    df["carbon_intensity"] = 0.300      # kgCO2/kWh, generic grid mix
 
     # 3. Simulate utilization (0.3–0.85). In production, this would be real load.
     df["utilization"] = np.random.uniform(0.3, 0.85, len(df))
@@ -1034,13 +1118,16 @@ class AIModelSuite:
         self.models = {}
         self.scalers = {}
         self.metrics = {}
-        self.feature_names = ['temperature', 'humidity', 'wind_speed', 'cooling_type']
+        self.timing = {}
+        self.feature_names = ['temperature', 'humidity', 'wind_speed', 'pressure', 'solar_radiation', 'cooling_type']
         self.is_trained = False
         self.used_real_weather = False
         self.training_source = "unknown"   # "real" or "synthetic"
         self.training_samples = 0
+        self.best_model_name = None
+        self.best_model = None
 
-    def generate_training_data(self, n_samples=5000, days=7, use_real_weather=True): #Intentional unsed 'days' param for API compatibility
+    def generate_training_data(self, n_samples=5000, days=7, use_real_weather=True, progress_cb=None): #Intentional unsed 'days' param for API compatibility
         """
         Build training dataset.
 
@@ -1051,9 +1138,9 @@ class AIModelSuite:
            (uniform sampling + physics model).
         """
         data = []
-        cooling_types = list(COOLING_SYSTEMS.keys())
+        cooling_types = sorted(COOLING_SYSTEMS.keys())
 
-                # --- 1. Try real historical weather-based training data ---
+# --- 1. Try real historical weather-based training data ---
         if use_real_weather:
             try:
                 # 4 years of hourly data for all datacenters
@@ -1064,6 +1151,8 @@ class AIModelSuite:
                         temp = float(row.get("temperature", 20.0))
                         humidity = float(row.get("humidity", 50.0))
                         wind = float(row.get("wind_speed", 5.0))
+                        pressure = float(row.get("pressure", 1013.25))
+                        solar = float(row.get("solar_radiation", 200.0))
 
                         # Derive cooling type from your climate classifier
                         climate_info = classify_climate(temp, humidity, wind)
@@ -1073,16 +1162,34 @@ class AIModelSuite:
                         cooling_idx = cooling_types.index(cooling_str)
 
                         # Ground-truth energy from physics model
-                        # Simple physical intuition: more wind improves free cooling efficiency
-                        # and lowers total energy needed per request.
+                        # Wind improves free cooling efficiency
+                        # Solar radiation adds thermal load
+                        # Line ~1153, BEFORE energy calculation
+
+                        # Pressure effect on cooling efficiency
+                        # Lower pressure → lower air density → worse convective cooling
+                        p0 = 1013.25  # Standard sea-level pressure (hPa)
+                        k_p = 0.8    # Sensitivity coefficient (2% penalty at ~50 hPa below normal)
+                        pressure_factor = (p0 / max(pressure, 1e-6)) ** 0.8
+                        pressure_factor = float(np.clip(pressure_factor, 0.7, 1.35))
                         wind_cooling_factor = 1 / (1 + 0.05 * wind)  # 10 m/s → ~33% reduction
+                        solar_factor = 1 + 0.0001 * max(0, solar - 200)  # Extra load above 200 W/m²
                         energy = calculate_energy_per_request(temp, humidity, cooling_str,
-                                                            energy_multiplier=wind_cooling_factor)
+                                                            energy_multiplier=wind_cooling_factor * solar_factor * pressure_factor)
                         energy += np.random.normal(0, 0.003)
 
+                        # Calculate delta_t for complete training data
+                        heat_kwh = energy / 1000.0
+                        # Option 1: Use default area (recommended for training data)
+                        area_km2 = 1.0  # Default area for training data generation
+                        delta_t = calculate_ΔT_contribution(heat_kwh, area_km2=area_km2, wind_speed=wind)
 
-                        data.append([temp, humidity, wind, cooling_idx, energy])
-
+                        # Option 2: Get from row data if available
+                        area_km2 = float(row.get("area_km2", 1.0))
+                        delta_t = calculate_ΔT_contribution(heat_kwh, area_km2=area_km2, wind_speed=wind)
+                        
+                        data.append([temp, humidity, wind, pressure, solar, cooling_idx, energy, delta_t])
+                                            
                     # Optional: track metadata in the suite
                     self.used_real_weather = True
                     self.training_source = "real"
@@ -1102,16 +1209,22 @@ class AIModelSuite:
                 temp = np.random.uniform(0, 45)
                 humidity = np.random.uniform(20, 95)
                 wind = np.random.uniform(0.5, 15)
+                pressure = np.random.uniform(980, 1040)  # hPa range
+                solar = np.random.uniform(0, 1000)  # W/m² (0 at night, ~1000 peak)
                 cooling_idx = np.random.randint(0, len(cooling_types))
                 cooling_str = cooling_types[cooling_idx]
-
+                p0 = 1013.25  # Standard sea-level pressure (hPa)
+                k_p = 0.8    # Sensitivity coefficient (2% penalty at ~50 hPa below normal)
+                pressure_factor = 1 + k_p * max(0, (p0 - pressure) / p0)
                 wind_cooling_factor = 1 / (1 + 0.05 * wind)
+                solar_factor = 1 + 0.0001 * max(0, solar - 200)
                 energy = calculate_energy_per_request(temp, humidity, cooling_str,
-                                      energy_multiplier=wind_cooling_factor)
+                                      energy_multiplier=wind_cooling_factor * solar_factor * pressure_factor)
                 energy += np.random.normal(0, 0.005)
-
-                data.append([temp, humidity, wind, cooling_idx, energy])
-            
+                heat_kwh = energy / 1000.0
+                delta_t = calculate_ΔT_contribution(heat_kwh, area_km2=1.0, wind_speed=wind)
+                data.append([temp, humidity, wind, pressure, solar, cooling_idx, energy, delta_t])
+                    
             # Set metadata for synthetic data
             self.used_real_weather = False
             self.training_source = "synthetic"
@@ -1120,7 +1233,7 @@ class AIModelSuite:
 
         df = pd.DataFrame(
             data,
-            columns=['temperature', 'humidity', 'wind_speed', 'cooling_type', 'energy']
+            columns=['temperature', 'humidity', 'wind_speed', 'pressure', 'solar_radiation', 'cooling_type', 'energy', 'delta_t']
         )
         
         # Remove any NaN values to prevent training errors
@@ -1129,7 +1242,7 @@ class AIModelSuite:
         
         return df
 
-    def train_all(self, train_selected='all', use_real_weather=True, days=7, n_samples=5000):
+    def train_all(self, train_selected='all', use_real_weather=True, days=7, n_samples=5000,  progress_cb=None):
         """
         Train all or selected models.
 
@@ -1145,7 +1258,7 @@ class AIModelSuite:
         )
 
         # ========== DATA SPLITTING (70/15/15) ==========
-        X = df[['temperature', 'humidity', 'wind_speed', 'cooling_type']].values
+        X = df[['temperature', 'humidity', 'wind_speed', 'pressure', 'solar_radiation', 'cooling_type']].values
         y = df['energy'].values
 
         # Split into train+val (85%) and test (15%)
@@ -1175,7 +1288,9 @@ class AIModelSuite:
         # ========== 1. MULTIPLE LINEAR REGRESSION ==========
         if train_selected in ['all', 'mlr']:
             mlr = LinearRegression()
+            start_time = time.perf_counter()
             mlr.fit(X_train_scaled, y_train)
+            train_time = time.perf_counter() - start_time
             
             # Evaluate on TEST set only
             mlr_pred = mlr.predict(X_test_scaled)
@@ -1185,6 +1300,7 @@ class AIModelSuite:
                 'r2': r2_score(y_test, mlr_pred),
                 'mae': mean_absolute_error(y_test, mlr_pred),
                 'rmse': np.sqrt(mean_squared_error(y_test, mlr_pred)),
+                'train_time': train_time,
                 'predictions': mlr_pred,
                 'y_test': y_test,
                 'coefficients': dict(zip(self.feature_names, mlr.coef_))
@@ -1204,9 +1320,9 @@ class AIModelSuite:
                 n_iter_no_change=20
             )
             
-            # Combine train + val for sklearn's internal validation
-            # OR manually implement early stopping
+            start_time = time.perf_counter()
             ann.fit(X_train_scaled, y_train)
+            train_time = time.perf_counter() - start_time
             
             # Evaluate on TEST set only
             ann_pred = ann.predict(X_test_scaled)
@@ -1216,6 +1332,7 @@ class AIModelSuite:
                 'r2': r2_score(y_test, ann_pred),
                 'mae': mean_absolute_error(y_test, ann_pred),
                 'rmse': np.sqrt(mean_squared_error(y_test, ann_pred)),
+                'train_time': train_time,
                 'predictions': ann_pred,
                 'y_test': y_test,
                 'architecture': '64→32→16'
@@ -1252,7 +1369,17 @@ class AIModelSuite:
                     verbose=0
                 )
                 optimizer.maximize(init_points=3, n_iter=7)
-                
+                # Store BO convergence history (validation R² per iteration)
+                bo_history = []
+                for i, r in enumerate(getattr(optimizer, "res", []), start=1):
+                    row = {"iteration": i, "val_r2": float(r.get("target", float("nan")))}
+                    params = r.get("params", {}) or {}
+                    for k, v in params.items():
+                        row[k] = float(v)
+                    bo_history.append(row)
+
+                best_val_r2 = float(getattr(optimizer, "max", {}).get("target", float("nan"))) if getattr(optimizer, "max", None) else float("nan")
+
                 best = optimizer.max['params'] if optimizer.max else {
                     'hidden1': 64, 'hidden2': 32, 'alpha': 0.01
                 }
@@ -1265,7 +1392,10 @@ class AIModelSuite:
                     random_state=42,
                     early_stopping=False
                 )
+                # Time training
+                start_time = time.perf_counter()
                 bayes_ann.fit(X_train_scaled, y_train)
+                train_time = time.perf_counter() - start_time
                 
                 # Evaluate on TEST set only (unseen during optimization!)
                 bayes_pred = bayes_ann.predict(X_test_scaled)
@@ -1275,6 +1405,9 @@ class AIModelSuite:
                     'r2': r2_score(y_test, bayes_pred),
                     'mae': mean_absolute_error(y_test, bayes_pred),
                     'rmse': np.sqrt(mean_squared_error(y_test, bayes_pred)),
+                    'train_time': train_time,
+                    'bo_history': bo_history,
+                    'bo_best_val_r2': best_val_r2,
                     'predictions': bayes_pred,
                     'y_test': y_test,
                     'best_params': best
@@ -1290,7 +1423,9 @@ class AIModelSuite:
         if 'MLR' in self.models:
             mlr = self.models['MLR']
             importances = dict(zip(self.feature_names, mlr.coef_))
-            results['feature_importance'] = importances
+            results.setdefault("feature_importance", {})
+            results["feature_importance"]["MLR"] = importances   # from MLR
+# ...
             print(f"Feature importances (MLR): {importances}")        # Feature importance (using TEST set for evaluation, not training)
         # Feature importance (using TEST set for evaluation, not training)
         if 'ANN' in self.models:
@@ -1304,7 +1439,7 @@ class AIModelSuite:
                     name: float(imp) for name, imp in 
                     zip(self.feature_names, perm_importance['importances_mean'])
                 }
-                results['feature_importance'] = importance_dict
+                results['feature_importance']["ANN"] = importance_dict
             except Exception as e:
                 print(f"[Feature Importance] Error: {str(e)}")
 
@@ -1345,24 +1480,109 @@ class AIModelSuite:
                 else:
                     results[model_name]['status'] = 'Good Fit'
                 
-                # For ANN/Bayesian: Extract loss curve if available
-                if model_name in ['ANN', 'Bayesian'] and hasattr(model, 'loss_curve_'):
-                    results[model_name]['loss_curve'] = model.loss_curve_
-                
+                # For ANN/Bayesian: Extract convergence traces (if available)
+                if model_name in ["ANN", "Bayesian"]:
+                    # loss_curve_ exists after fit; still guard just in case
+                    loss = getattr(model, "loss_curve_", None)
+                    results[model_name]["loss_curve"] = list(loss) if loss is not None else []
+
+                    # validation_scores_ exists only with early_stopping=True in sklearn,
+                    # but in some setups it can exist and still be None -> must guard
+                    val_scores = getattr(model, "validation_scores_", None)
+                    try:
+                        results[model_name]["val_score_curve"] = list(val_scores) if val_scores is not None else []
+                    except TypeError:
+                        results[model_name]["val_score_curve"] = []
+
+
+                    if hasattr(model, 'n_iter_'):
+                        results[model_name]['n_iter'] = int(model.n_iter_)
+               
                 print(f"[{model_name}] Train R²: {results[model_name]['train_r2']:.4f}, "
                       f"Val R²: {results[model_name]['val_r2']:.4f}, "
                       f"Test R²: {results[model_name]['r2']:.4f} - "
                       f"{results[model_name]['status']}")
 
         # ========== RETURN RESULTS ==========
-        self.metrics = results
         self.is_trained = True
-        return results        
+        # Select best model based on R² score
+        if results:
+            # Filter out error results
+            valid_results = {k: v for k, v in results.items() 
+                           if 'r2' in v and 'error' not in v}
+            
+            if valid_results:
+                self.best_model_name = max(
+                    valid_results.keys(), 
+                    key=lambda x: valid_results[x]['r2']
+                )
+                self.best_model = self.models[self.best_model_name]
+
+        #         # Prepare ΔT target
+        #         y_dt = df['delta_t'].values
+
+        #         # same splits as energy (reuse X_train, X_val, X_test indices if possible)
+        #         # simplest: redo split with same random_state (works because df order fixed)
+        #         X = df[['temperature','humidity','wind_speed','pressure','solar_radiation','cooling_type']].values
+        #         X_train_val, X_test, y_train_val_dt, y_test_dt = train_test_split(X, y_dt, test_size=0.15, random_state=42)
+        #         X_train, X_val, y_train_dt, y_val_dt = train_test_split(X_train_val, y_train_val_dt, test_size=0.1765, random_state=42)
+
+        #         # use the same feature scaler as energy
+        #         scaler_main = self.scalers['main']
+        #         X_train_scaled = scaler_main.transform(X_train)
+        #         X_val_scaled   = scaler_main.transform(X_val)
+        #         X_test_scaled  = scaler_main.transform(X_test)
+
+        #         # energy predictions become an extra feature
+        #         best_energy = self.models[self.best_model_name]
+        #         Ehat_train = best_energy.predict(X_train_scaled).reshape(-1,1)
+        #         Ehat_val   = best_energy.predict(X_val_scaled).reshape(-1,1)
+        #         Ehat_test  = best_energy.predict(X_test_scaled).reshape(-1,1)
+
+        #         Xdt_train = np.hstack([X_train_scaled, Ehat_train])
+        #         Xdt_val   = np.hstack([X_val_scaled,   Ehat_val])
+        #         Xdt_test  = np.hstack([X_test_scaled,  Ehat_test])
+
+        #         # scale ΔT features separately (because Ehat is in Wh scale)
+        #         scaler_dt = StandardScaler()
+        #         Xdt_train_s = scaler_dt.fit_transform(Xdt_train)
+        #         Xdt_val_s   = scaler_dt.transform(Xdt_val)  
+        #         Xdt_test_s  = scaler_dt.transform(Xdt_test)
+        #         self.scalers['dt'] = scaler_dt
+
+        #         # clone the best model type and train for ΔT
+        #         dt_model = clone(best_energy)
+        #         dt_model.fit(Xdt_train_s, y_train_dt)
+        #         self.models['DT'] = dt_model
+                
+        #         # Evaluate ΔT model
+        #         dt_val_pred = dt_model.predict(Xdt_val_s)
+        #         dt_test_pred = dt_model.predict(Xdt_test_s)
+                
+        #         results['DT'] = {
+        #             'r2': r2_score(y_test_dt, dt_test_pred),
+        #             'mae': mean_absolute_error(y_test_dt, dt_test_pred),
+        #             'rmse': np.sqrt(mean_squared_error(y_test_dt, dt_test_pred)),
+        #             'val_r2': r2_score(y_val_dt, dt_val_pred),
+        #             'val_mae': mean_absolute_error(y_val_dt, dt_val_pred),
+        #         }
+        #         print(f"[ΔT Model] Test R²: {results['DT']['r2']:.4f}, MAE: {results['DT']['mae']:.6f}°C")
+                
+        #         print(f"\n{'='*60}")
+        #         print(f"✓ SELECTED BEST MODEL: {self.best_model_name}")
+        #         print(f"  R² = {valid_results[self.best_model_name]['r2']:.4f}")
+        #         print(f"  MAE = {valid_results[self.best_model_name]['mae']:.4f} Wh")
+        #         print(f"  RMSE = {valid_results[self.best_model_name]['rmse']:.4f} Wh")
+        #         print(f"{'='*60}\n")
+
+        # Store metrics for later access
+        self.metrics = results
+        return results
 
     def predict(self, features, model_name=None):
         """
         Predict energy using specified or best model.
-        Features: [temperature, humidity, wind_speed, cooling_type_idx]
+        Features: [temperature, humidity, wind_speed, pressure, solar_radiation, cooling_type_idx]
         """
         if not self.is_trained:
             raise ValueError("Models not trained. Call train_all() first.")
@@ -1377,25 +1597,28 @@ class AIModelSuite:
         X_scaled = self.scalers['main'].transform(X)
 
         return self.models[model_name].predict(X_scaled)[0]
+    
+    def predict_dt(self, features):
+        raise NotImplementedError("ΔT model disabled. Use physics-based ΔT (calculate_ΔT_contribution).")
 
+    
     def get_best_model(self):
-        """Return the model with highest R²."""
+        """Return the best ENERGY model (exclude DT + feature_importance)."""
         if not self.metrics:
-            return ('MLR', 0.0)
+            return ("MLR", 0.0)
 
-        best_name = None
-        best_r2 = -np.inf
+        skip = {"feature_importance", "DT"}
+        best_name, best_r2 = None, -np.inf
 
         for name, metrics in self.metrics.items():
-            if name == 'feature_importance':
+            if name in skip:
                 continue
-            if isinstance(metrics, dict) and 'r2' in metrics:
-                if metrics['r2'] > best_r2:
-                    best_r2 = metrics['r2']
+            if isinstance(metrics, dict) and "r2" in metrics and "error" not in metrics:
+                if metrics["r2"] > best_r2:
+                    best_r2 = metrics["r2"]
                     best_name = name
 
-        return (best_name or 'MLR', best_r2)
-
+        return (best_name or "MLR", best_r2)
 
 # ============================================================================
 # ROUTING STRATEGIES
@@ -1405,7 +1628,7 @@ def route_random(datacenters, num_requests):
     """
     Random routing - baseline strategy.
     Distributes requests uniformly (with slight randomization).
-    Does NOT consider energy, UHI, or latency – pure control case.
+    Does NOT consider energy, ΔT-AR, or latency – pure control case.
     """
     n_dcs = len(datacenters)
     if n_dcs == 0:
@@ -1430,69 +1653,162 @@ def route_energy_only(datacenters, weather_data, cooling_selections,
     """
     Energy-only routing - demonstrates Stockholm Concentration Problem.
     Routes more traffic to datacenters with lowest energy cost.
-    Ignores latency SLO and UHI – intentionally unconstrained.
-    
-    Args:
-        max_dc_capacity_mw: Maximum power capacity per datacenter in MW
+    Ignores latency SLO and ΔT-AR – intentionally unconstrained.
     """
+    if not datacenters or num_requests <= 0:
+        return {}
+
     energy_scores = {}
-    
-    # 1. Compute energy per request at each DC
+
+    # 1) Compute energy per request at each DC
     for dc_name, dc_info in datacenters.items():
-        weather = weather_data.get(dc_name, {})
+        weather = weather_data.get(dc_name, {}) or {}
         cooling = cooling_selections.get(dc_name, dc_info.get('default_cooling', 'air_economizer'))
-        
+
         temp = weather.get('temperature', 20)
         humidity = weather.get('humidity', 50)
         wind = weather.get('wind_speed', 5)
-        
-        # Use AI prediction if available, otherwise physics model
-        if ai_models is not None and ai_models.is_trained:
+        pressure = weather.get('pressure', 1013.25)
+        solar = weather.get('solar_radiation', 200.0)
+
+        if ai_models is not None and getattr(ai_models, "is_trained", False):
             cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy = ai_models.predict([temp, humidity, wind, cooling_idx])
+            energy = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
         else:
             energy = calculate_energy_per_request(temp, humidity, cooling)
-        
-        energy_scores[dc_name] = energy
-    
-    # 2. Inverse weighting: lower energy = higher weight (cubic preference)
+
+        energy_scores[dc_name] = float(energy)
+
+    if not energy_scores:
+        return {}
+
+    # 2) Inverse weighting (lower energy => higher weight)
     min_energy = min(energy_scores.values())
-    weights = {
-        dc: (min_energy / max(e, 1e-3)) ** 3
-        for dc, e in energy_scores.items()
-    }
+    weights = {dc: (min_energy / max(e, 1e-3)) ** 3 for dc, e in energy_scores.items()}
     total_weight = sum(weights.values())
-    
-    # 3. Apply capacity limits
+
+    # Guard against pathological totals
+    if total_weight <= 0 or not np.isfinite(total_weight):
+        weights = {dc: 1.0 for dc in energy_scores}
+        total_weight = float(len(weights))
+
+    # 3) Apply capacity limits
     distribution = {}
-    remaining = num_requests
+    remaining = int(num_requests)
+
     for dc, w in weights.items():
         base_requests = int((w / total_weight) * num_requests)
         capped = apply_capacity_limit(base_requests, energy_scores[dc], max_dc_capacity_mw)
         distribution[dc] = capped
         remaining -= capped
-    
-    # 4. Distribute any remaining to the absolute best (lowest energy) DC
-    if remaining > 0:
-        best_dc = min(energy_scores, key=lambda dc: energy_scores[dc])
+
+    # 4) Give remainder to best DC (still safe)
+    if remaining > 0 and energy_scores:
+        best_dc = min(energy_scores, key=lambda d: energy_scores[d])
         distribution[best_dc] = distribution.get(best_dc, 0) + remaining
-    
+
     return distribution
 
 
-def route_uhi_aware(datacenters, weather_data, cooling_selections,
+def route_heat_only(datacenters, weather_data, cooling_selections,
+                    num_requests, ai_models=None, max_dc_capacity_mw=500):
+    """
+    Heat-Only routing:
+    Allocate more requests to datacenters with lower predicted ΔT (or ΔT-AR proxy),
+    subject to capacity limits.
+    """
+    if not datacenters:
+        return {}
+
+    # 1) Compute ΔT score (lower is better) + energy (for capacity)
+    dt_scores = {}
+    energy_map = {}
+
+    for dc_name, dc_info in datacenters.items():
+        w = weather_data.get(dc_name, {}) or {}
+        cooling = cooling_selections.get(dc_name, dc_info.get("default_cooling", "air_economizer"))
+
+        temp = w.get("temperature", 20)
+        humidity = w.get("humidity", 50)
+        wind = w.get("wind_speed", 5)
+        pressure = w.get("pressure", 1013.25)
+        solar = w.get("solar_radiation", 200.0)
+
+        cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
+
+        # Energy (for capacity + optional ΔT physics)
+        if ai_models is not None and getattr(ai_models, "is_trained", False):
+            energy = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
+        else:
+            energy = calculate_energy_per_request(temp, humidity, cooling)
+
+        energy_map[dc_name] = energy
+
+        # ΔT (prefer AI DT if available, otherwise physics-based)
+        dt = None
+        if ai_models is not None and getattr(ai_models, "is_trained", False) and "DT" in getattr(ai_models, "models", {}):
+            try:
+                dt = ai_models.predict_dt([temp, humidity, wind, pressure, solar, cooling_idx])
+            except Exception:
+                dt = None
+
+        if dt is None:
+            heat_kwh = energy / 1000.0
+            dt = calculate_ΔT_contribution(heat_kwh, area_km2=1.0, wind_speed=wind)
+
+        dt_scores[dc_name] = float(dt)
+
+    # 2) Convert score to weights: lower ΔT -> higher weight
+    if not dt_scores:
+        return {}
+    min_dt = min(dt_scores.values())
+    weights = {dc: (min_dt / max(dt, 1e-6)) ** 3 for dc, dt in dt_scores.items()}
+    total_w = sum(weights.values()) or 1.0  # Guard: use 1.0 if sum is zero
+
+    # 3) Allocate with capacity limits
+    distribution = {}
+    remaining = num_requests
+    for dc, w in weights.items():
+        base_requests = int((w / total_w) * num_requests)
+        capped = apply_capacity_limit(base_requests, energy_map[dc], max_dc_capacity_mw)
+        distribution[dc] = capped
+        remaining -= capped
+
+    # 4) Distribute remainder greedily to lowest ΔT
+    if remaining > 0:
+        ranked = sorted(dt_scores.items(), key=lambda x: x[1])  # lowest ΔT first
+        i = 0
+        while remaining > 0 and ranked:
+            dc = ranked[i % len(ranked)][0]
+            add_one = apply_capacity_limit(1, energy_map[dc], max_dc_capacity_mw)
+            if add_one <= 0:
+                i += 1
+                # avoid infinite loop if all are capped
+                if i > len(ranked) * 3:
+                    break
+                continue
+            distribution[dc] += add_one
+            remaining -= add_one
+            i += 1
+
+    return distribution
+
+def route_ΔT_aware(datacenters, weather_data, cooling_selections,
                     num_requests, ai_models=None, max_dc_capacity_mw=100):
     """
-    UHI-Aware routing - research contribution.
+    ΔT-AR routing - research contribution.
     Penalizes datacenters with high thermal vulnerability.
-    Still does NOT enforce latency SLO – this is a UHI-focused baseline.
+    Still does NOT enforce latency SLO – this is a ΔT-AR-focused baseline.
     
     Args:
         max_dc_capacity_mw: Maximum power capacity per datacenter in MW
     """
     scores = {}
     
-    # 1. Compute UHI-aware cost per DC
+    if not datacenters or num_requests <= 0:
+        return {}
+
+    # 1. Compute ΔT-AR cost per DC
     for dc_name, dc_info in datacenters.items():
         weather = weather_data.get(dc_name, {})
         cooling = cooling_selections.get(dc_name, dc_info.get('default_cooling', 'air_economizer'))
@@ -1500,27 +1816,34 @@ def route_uhi_aware(datacenters, weather_data, cooling_selections,
         temp = weather.get('temperature', 20)
         humidity = weather.get('humidity', 50)
         wind = weather.get('wind_speed', 5)
+        pressure = weather.get('pressure', 1013.25)
+        solar = weather.get('solar_radiation', 200.0)
         
         # Energy calculation
         if ai_models is not None and ai_models.is_trained:
             cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy = ai_models.predict([temp, humidity, wind, cooling_idx])
+            energy = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
         else:
             energy = calculate_energy_per_request(temp, humidity, cooling)
         
-        # UHI vulnerability: hotter sites are more problematic
-        uhi_vulnerability = 1.0 + 0.05 * max(0.0, temp - 25.0)
+        # ΔT-AR vulnerability: hotter sites are more problematic
+        ΔT_vulnerability = 1.0 + 0.05 * max(0.0, temp - 25.0)
         
         # Wind mitigation: more wind = better dispersion → lower effective score
         wind_benefit = 1.0 / (1.0 + 0.05 * wind)
         
         # Combined cost (lower is better)
-        scores[dc_name] = energy * uhi_vulnerability * wind_benefit
+        scores[dc_name] = energy * ΔT_vulnerability * wind_benefit
     
     # 2. Inverse weighting and capacity limiting
     max_score = max(scores.values())
     weights = {dc: max_score / max(s, 1e-6) for dc, s in scores.items()}
     total_weight = sum(weights.values())
+    if total_weight <= 0 or not np.isfinite(total_weight):
+        # fall back to uniform
+        weights = {dc: 1.0 for dc in scores}
+        total_weight = float(len(weights))
+
     
     # Track energy for capacity calculation
     energy_map = {}
@@ -1530,9 +1853,11 @@ def route_uhi_aware(datacenters, weather_data, cooling_selections,
         temp = weather.get('temperature', 20)
         humidity = weather.get('humidity', 50)
         wind = weather.get('wind_speed', 5)
+        pressure = weather.get('pressure', 1013.25)
+        solar = weather.get('solar_radiation', 200.0)
         if ai_models is not None and ai_models.is_trained:
             cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy_map[dc] = ai_models.predict([temp, humidity, wind, cooling_idx])
+            energy_map[dc] = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
         else:
             energy_map[dc] = calculate_energy_per_request(temp, humidity, cooling)
     
@@ -1556,7 +1881,7 @@ def route_uhi_aware(datacenters, weather_data, cooling_selections,
 def route_multi_objective(datacenters, weather_data, cooling_selections, user_location, 
                           num_requests, ai_models=None, latency_threshold=100, max_dc_capacity_mw=100):
     """
-    Multi-objective routing - balances Energy, Latency, Carbon, UHI.
+    Multi-objective routing - balances Energy, Latency, Carbon, ΔT-AR.
     This is the ONLY strategy that enforces a latency target (latency_threshold).
     
     Args:
@@ -1582,18 +1907,20 @@ def route_multi_objective(datacenters, weather_data, cooling_selections, user_lo
         temp = weather.get('temperature', 20)
         humidity = weather.get('humidity', 50)
         wind = weather.get('wind_speed', 5)
+        pressure = weather.get('pressure', 1013.25)
+        solar = weather.get('solar_radiation', 200.0)
         
-        # 1. Energy
+        # Energy (from AI or physics)
         if ai_models is not None and ai_models.is_trained:
             cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy = ai_models.predict([temp, humidity, wind, cooling_idx])
+            energy = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
         else:
             energy = calculate_energy_per_request(temp, humidity, cooling)
         energy_norm = energy / 1.0  # assume ~1 Wh upper reference
         
         # 2. Latency vs threshold
         distance = haversine_distance(user_lat, user_lon, dc_info['lat'], dc_info['lon'])
-        latency = calculate_latency(distance)  # ms
+        latency = calculate_latency(distance, load_fraction=0.7)  # ms
         
         if latency_threshold is None or latency_threshold <= 0:
             effective_thresh = 200.0  # fallback reference
@@ -1612,11 +1939,11 @@ def route_multi_objective(datacenters, weather_data, cooling_selections, user_lo
         carbon = get_carbon_intensity(region, hour)
         carbon_norm = carbon / 0.7  # assume ~0.7 kgCO2/kWh as "worst" grid
         
-        # 4. UHI vulnerability (wind-aware)
-        beta_uhi = 0.15  # same idea as in calculate_uhi_contribution
-        base_uhi = max(0.0, temp - 15.0) / 30.0   # 0–1 depending on how hot
-        wind_factor = 1.0 / (1.0 + beta_uhi * wind)  # more wind → less trapped heat
-        uhi_score = base_uhi * wind_factor
+        # 4. ΔT-AR vulnerability (wind-aware)
+        beta_ΔT = 0.15  # same idea as in calculate_ΔT_contribution
+        base_ΔT = max(0.0, temp - 15.0) / 30.0   # 0–1 depending on how hot
+        wind_factor = 1.0 / (1.0 + beta_ΔT * wind)  # more wind → less trapped heat
+        ΔT_score = base_ΔT * wind_factor
         
         # 5. Latency penalty when SLO is violated
         if latency > effective_thresh:
@@ -1625,14 +1952,14 @@ def route_multi_objective(datacenters, weather_data, cooling_selections, user_lo
             latency_penalty = 0.0
         
         # 6. Base multi-objective score
-        base_score = 0.25 * (energy_norm + latency_norm + carbon_norm + uhi_score)
+        base_score = 0.25 * (energy_norm + latency_norm + carbon_norm + ΔT_score)
         score = base_score + latency_penalty
         
         scores[dc_name] = {
             "energy_norm": energy_norm,
             "latency_norm": latency_norm,
             "carbon_norm": carbon_norm,
-            "uhi_score": uhi_score,
+            "ΔT_score": ΔT_score,
             "score": score,
             "latency": latency,
             "requests": 0,
@@ -1672,9 +1999,11 @@ def route_multi_objective(datacenters, weather_data, cooling_selections, user_lo
         temp = weather.get('temperature', 20)
         humidity = weather.get('humidity', 50)
         wind = weather.get('wind_speed', 5)
+        pressure = weather.get('pressure', 1013.25)
+        solar = weather.get('solar_radiation', 200.0)
         if ai_models is not None and ai_models.is_trained:
             cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy_map[dc] = ai_models.predict([temp, humidity, wind, cooling_idx])
+            energy_map[dc] = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
         else:
             energy_map[dc] = calculate_energy_per_request(temp, humidity, cooling)
     
@@ -1698,125 +2027,160 @@ def route_multi_objective(datacenters, weather_data, cooling_selections, user_lo
 # ============================================================================
 # SIMULATION ENGINE
 # ============================================================================
-
 def run_simulation(datacenters, weather_data, user_location, num_requests,
                    cooling_selections, energy_multiplier=1.0, ai_models=None,
                    latency_threshold=100, max_dc_capacity_mw=100):
     """
     Run complete simulation for all routing strategies.
     Returns comprehensive metrics for comparison.
-    
-    Args:
-        max_dc_capacity_mw: Maximum power capacity per datacenter in MW
+
+    Fixes included:
+    - Use true load_fraction in latency (no hardcoded 0.7)
+    - Apply energy_multiplier consistently (ANN + physics)
+    - Compute cooling_idx once
+    - Compute ΔT once (no duplicate fallback)
+    - Make Wh/kWh conversions explicit and consistent
     """
     user_lat, user_lon = user_location
     hour = datetime.now().hour
-    
-    # Get distributions from all strategies
+
     strategies = {
         'Random': route_random(datacenters, num_requests),
-        'Energy-Only': route_energy_only(datacenters, weather_data, cooling_selections, 
-                                          num_requests, ai_models, max_dc_capacity_mw),
-        'UHI-Aware': route_uhi_aware(datacenters, weather_data, cooling_selections,
-                                      num_requests, ai_models, max_dc_capacity_mw),
+        'Energy-Only': route_energy_only(datacenters, weather_data, cooling_selections,
+                                         num_requests, ai_models, max_dc_capacity_mw),
+        'Heat-Only': route_heat_only(datacenters, weather_data, cooling_selections,
+                                     num_requests, ai_models, max_dc_capacity_mw),
+        'ΔT-AR': route_ΔT_aware(datacenters, weather_data, cooling_selections,
+                                num_requests, ai_models, max_dc_capacity_mw),
         'Multi-Objective': route_multi_objective(datacenters, weather_data, cooling_selections,
-                                                  user_location, num_requests, ai_models,
-                                                  latency_threshold, max_dc_capacity_mw)
+                                                 user_location, num_requests, ai_models,
+                                                 latency_threshold, max_dc_capacity_mw)
     }
-    
+
     results = {}
-    
+
     for strategy_name, distribution in strategies.items():
         strategy_results = {
             'distribution': distribution,
             'datacenters': {}
         }
-        
-        total_energy = 0
-        total_carbon = 0
-        weighted_latency = 0
-        total_heat = 0
+
+        total_energy_wh = 0.0
+        total_carbon_kg = 0.0
+        weighted_latency_ms = 0.0
+        total_heat_wh = 0.0
         heat_values = []
-        uhi_values = []
-        
+        ΔT_values = []
+
         for dc_name, requests in distribution.items():
             if requests == 0:
                 continue
-            
+
             dc_info = datacenters[dc_name]
             weather = weather_data.get(dc_name, {})
             cooling = cooling_selections.get(dc_name, dc_info.get('default_cooling', 'air_economizer'))
-            
-            temp = weather.get('temperature', 20)
+
+            # Weather defaults
+            temp     = weather.get('temperature', 20)
             humidity = weather.get('humidity', 50)
-            wind = weather.get('wind_speed', 5)
-            
-            # Energy calculation
-            energy_per_req = calculate_energy_per_request(temp, humidity, cooling, energy_multiplier)
-            dc_energy = energy_per_req * requests
-            
-            # Carbon calculation: C = E × I (Luccioni & Hernandez-Garcia, 2023)
+            wind     = weather.get('wind_speed', 5)
+            pressure = weather.get('pressure', 1013.25)
+            solar    = weather.get('solar_radiation', 200.0)
+
+            # Cooling index (compute once)
+            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
+
+            # -------------------------
+            # Energy per request (Wh/request)
+            # -------------------------
+            if ai_models is not None and getattr(ai_models, "is_trained", False):
+                energy_per_req = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
+                energy_per_req = float(energy_per_req) * float(energy_multiplier)
+            else:
+                energy_per_req = calculate_energy_per_request(temp, humidity, cooling, energy_multiplier)
+
+            # Total energy (Wh) and heat (kWh for ΔT + carbon)
+            dc_energy_wh = float(energy_per_req) * float(requests)
+            dc_heat_kwh  = dc_energy_wh / 1000.0  # 1000 Wh = 1 kWh
+
+            # -------------------------
+            # ΔT proxy (AI DT if available, else physics)
+            # -------------------------
+            ΔT = None
+            if (ai_models is not None
+                and getattr(ai_models, "is_trained", False)
+                and "DT" in getattr(ai_models, "models", {})):
+                try:
+                    ΔT = ai_models.predict_dt([temp, humidity, wind, pressure, solar, cooling_idx])
+                    ΔT = float(ΔT)
+                except Exception:
+                    ΔT = None
+
+            if ΔT is None:
+                ΔT = calculate_ΔT_contribution(dc_heat_kwh, area_km2=1.0, wind_speed=wind)
+
+            # -------------------------
+            # Carbon (kg) : kWh × (kg/kWh)
+            # -------------------------
             region = dc_info.get('region', 'default')
             carbon_intensity = get_carbon_intensity(region, hour)
-            dc_carbon = (dc_energy / 1000) * carbon_intensity  # kWh × kg/kWh = kg
-            
-            # Latency calculation
-            distance = haversine_distance(user_lat, user_lon, dc_info['lat'], dc_info['lon'])
-            load_fraction = requests / num_requests
-            dc_latency = calculate_latency(distance, load_fraction)
-            
-            # Heat dissipation (all energy becomes heat eventually)
-            pue = COOLING_SYSTEMS[cooling]['pue']
-            dc_heat = dc_energy  # Total energy including cooling overhead
-            
-            # # UHI contribution using physics-based heat flux model
-            uhi = calculate_uhi_contribution(dc_heat / 1000, area_km2=1.0, wind_speed=wind)
-            
+            dc_carbon_kg = dc_heat_kwh * float(carbon_intensity)
+
+            # -------------------------
+            # Latency (ms) – use true load_fraction
+            # -------------------------
+            distance_km = haversine_distance(user_lat, user_lon, dc_info['lat'], dc_info['lon'])
+            load_fraction = float(requests) / float(num_requests)
+            dc_latency_ms = calculate_latency(distance_km, load_fraction=load_fraction)
+
+            # Store DC-level metrics
             strategy_results['datacenters'][dc_name] = {
                 'requests': requests,
                 'percentage': (requests / num_requests) * 100,
-                'energy_wh': dc_energy,
+                'energy_wh': dc_energy_wh,
                 'energy_per_req': energy_per_req,
-                'carbon_kg': dc_carbon,
-                'carbon_g': dc_carbon * 1000,
-                'latency_ms': dc_latency,
-                'heat_wh': dc_heat,
-                'heat_kwh': dc_heat / 1000,
-                'uhi_contribution': uhi,
+                'carbon_kg': dc_carbon_kg,
+                'carbon_g': dc_carbon_kg * 1000,
+                'latency_ms': dc_latency_ms,
+                'heat_wh': dc_energy_wh,     # all energy becomes heat (Wh)
+                'heat_kwh': dc_heat_kwh,
+                'ΔT_contribution': ΔT,
                 'load_fraction': load_fraction,
-                'distance_km': distance
+                'distance_km': distance_km
             }
-            
-            total_energy += dc_energy
-            total_carbon += dc_carbon
-            weighted_latency += dc_latency * load_fraction
-            total_heat += dc_heat
-            heat_values.append(dc_heat)
-            uhi_values.append(uhi)
-        
-        # Calculate concentration metrics
+
+            # Accumulate strategy totals
+            total_energy_wh += dc_energy_wh
+            total_carbon_kg += dc_carbon_kg
+            weighted_latency_ms += dc_latency_ms * load_fraction
+            total_heat_wh += dc_energy_wh
+
+            heat_values.append(dc_energy_wh)
+            ΔT_values.append(ΔT)
+
+        # Concentration metric (CV)
         if len(heat_values) > 1 and np.mean(heat_values) > 0:
-            heat_cv = np.std(heat_values) / np.mean(heat_values)
+            heat_cv = float(np.std(heat_values) / np.mean(heat_values))
         else:
-            heat_cv = 0
-        
-        peak_uhi = max(uhi_values) if uhi_values else 0
-        avg_uhi = np.mean(uhi_values) if uhi_values else 0
-        
+            heat_cv = 0.0
+
+        peak_ΔT = float(max(ΔT_values)) if ΔT_values else 0.0
+        avg_ΔT  = float(np.mean(ΔT_values)) if ΔT_values else 0.0
+
         strategy_results['totals'] = {
-            'energy_wh': total_energy,
-            'carbon_kg': total_carbon,
-            'carbon_g': total_carbon * 1000,
-            'avg_latency_ms': weighted_latency,
-            'total_heat_wh': total_heat,
-            'total_heat_kwh': total_heat / 1000,
+            'energy_wh': total_energy_wh,
+            'carbon_kg': total_carbon_kg,
+            'carbon_g': total_carbon_kg * 1000,
+            'avg_latency_ms': weighted_latency_ms,
+            'total_heat_wh': total_heat_wh,
+            'total_heat_kwh': total_heat_wh / 1000.0,
             'heat_cv': heat_cv,
-            'peak_uhi': peak_uhi,
-            'avg_uhi': avg_uhi
+            'peak_ΔT': peak_ΔT,
+            'avg_ΔT': avg_ΔT
         }
-        
+
         results[strategy_name] = strategy_results
-    
+
     return results
 
 
@@ -1825,7 +2189,7 @@ def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
     """
     Run Monte Carlo simulation with stochastic weather variations.
     """
-    all_results = {strategy: [] for strategy in ['Random', 'Energy-Only', 'UHI-Aware', 'Multi-Objective']}
+    all_results = {strategy: [] for strategy in ['Random', 'Energy-Only', 'Heat-Only', 'ΔT-AR', 'Multi-Objective']}
     
     for run in range(n_runs):
         # Generate stochastic weather variations
@@ -1835,9 +2199,11 @@ def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
                 'temperature': weather['temperature'] + np.random.normal(0, 5),
                 'humidity': np.clip(weather['humidity'] + np.random.normal(0, 15), 20, 95),
                 'wind_speed': max(0.5, weather['wind_speed'] + np.random.normal(0, 2)),
+                'pressure': weather.get('pressure', 1013.25) + np.random.normal(0, 10),
+                'solar_radiation': max(0, weather.get('solar_radiation', 200.0) + np.random.normal(0, 100)),
                 'source': 'Monte Carlo variation'
             }
-        
+                
         # Vary request volume
         varied_requests = int(num_requests * (1 + np.random.uniform(-0.2, 0.2)))
         
@@ -1866,7 +2232,7 @@ def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
 
 
 # ============================================================================
-# VISUALIZATION FUNCTIONS
+# VISUALIZATION FUNCTIONS - FIXED DIMENSIONS
 # ============================================================================
 
 def create_geographic_map(datacenters, user_location, distribution=None, title="Geographic Distribution"):
@@ -1883,11 +2249,11 @@ def create_geographic_map(datacenters, user_location, distribution=None, title="
         lon=[user_lon],
         lat=[user_lat],
         mode='markers+text',
-        marker=dict(size=18, color='#e94560', symbol='star', 
+        marker=dict(size=18, color='#e94560', symbol='star',
                    line=dict(width=2, color='white')),
         text=['You'],
         textposition='top center',
-        textfont=dict(size=12, color='#e94560', family='Source Sans 3'),
+        textfont=dict(size=28, color='#e94560', family='Times New Roman'),
         name='User Location',
         hovertemplate="<b>Your Location</b><br>Lat: %{lat:.2f}<br>Lon: %{lon:.2f}<extra></extra>"
     ))
@@ -1944,12 +2310,15 @@ def create_geographic_map(datacenters, user_location, distribution=None, title="
     )
     
     fig.update_layout(
-        title=dict(text=title, font=dict(size=16, family='Source Serif 4')),
-        height=450,
-        margin=dict(l=0, r=0, t=50, b=0),
+        title=dict(text=f"<b>{title}</b>", font=dict(size=48, family='Times New Roman', color='#000000')),
+        height=900,
+        autosize=True,
+        margin=dict(l=0, r=0, t=120, b=0),
         showlegend=True,
-        legend=dict(x=0.01, y=0.99, bgcolor='rgba(255,255,255,0.9)',
-                   bordercolor='#ddd', borderwidth=1)
+        legend=dict(x=0.01, y=0.99, bgcolor='rgba(255,255,255,0.95)',
+                   bordercolor='#999', borderwidth=2,
+                   font=dict(size=28, family='Times New Roman', color='#000000')),
+        paper_bgcolor='white'
     )
     
     return fig
@@ -1988,26 +2357,32 @@ def create_traffic_distribution_chart(results, title="Traffic Distribution by St
             x=strategies,
             y=values,
             marker_color=climate_colors.get(climate, '#6b7280'),
-            text=[f"{v:,}" for v in values],
+            text=[f"<b>{v:,}</b>" for v in values],
             textposition='outside',
-            textfont=dict(size=11),
+            textfont=dict(size=28, color='#000000', family='Times New Roman'),
             cliponaxis=False,
             hovertemplate=f"<b>{short_name}</b><br>%{{x}}: %{{y:,}} requests<extra></extra>"
         ))
 
-    
+
     fig.update_layout(
-        title=dict(text=title, font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="Routing Strategy",
-        yaxis_title="Number of Requests",
+        title=dict(text=f"<b>{title}</b>", font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Number of Requests</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
         barmode='group',
         bargap=0.25,
         bargroupgap=0.1,
-        height=400,
-        legend=dict(orientation='h', y=-0.15, x=0.5, xanchor='center'),
-        font=dict(family='Source Sans 3'),
-        uniformtext_minsize=10,
-        uniformtext_mode='hide'
+        height=900,
+        margin=dict(l=100, r=60, t=120, b=180),
+        legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
+                   font=dict(size=32, family='Times New Roman', color='#000000')),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        uniformtext_minsize=28,
+        uniformtext_mode='hide',
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
 
     
@@ -2028,7 +2403,8 @@ def create_model_comparison_chart(model_metrics):
     metric_names = ['R² Score', 'MAE (Wh)', 'RMSE (Wh)']
     colors = ['#3b82f6', '#10b981', '#f59e0b']
     
-    fig = make_subplots(rows=1, cols=3, subplot_titles=metric_names)
+    fig = make_subplots(rows=1, cols=3, subplot_titles=metric_names,
+                        horizontal_spacing=0.12)
     
     for i, (metric, name) in enumerate(zip(metrics, metric_names)):
         values = [model_metrics[m][metric] for m in models]
@@ -2037,17 +2413,26 @@ def create_model_comparison_chart(model_metrics):
             x=models,
             y=values,
             marker_color=colors[i],
-            text=[f"{v:.4f}" for v in values],
+            text=[f"<b>{v:.4f}</b>" for v in values],
             textposition='auto',
+            textfont=dict(size=28, color='#000000', family='Times New Roman'),
             showlegend=False
         ), row=1, col=i+1)
-    
+
     fig.update_layout(
-        title=dict(text="AI Model Performance Comparison", 
-                  font=dict(size=16, family='Source Serif 4')),
-        height=350,
-        font=dict(family='Source Sans 3')
+        title=dict(text="<b>AI Model Performance Comparison</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        height=900,
+        margin=dict(l=100, r=60, t=120, b=100),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
+
+    # Update subplot titles and axis labels with larger fonts
+    fig.update_annotations(font=dict(size=36, family='Times New Roman', color='#000000'))
+    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
+    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
     
     return fig
 
@@ -2062,6 +2447,10 @@ def create_prediction_scatter(model_metrics, model_name='ANN'):
     
     y_test = model_metrics[model_name]['y_test']
     y_pred = model_metrics[model_name]['predictions']
+    r2 = model_metrics[model_name]['r2']
+    
+    # Calculate residuals for color
+    residuals = y_test - y_pred
     
     fig = go.Figure()
     
@@ -2070,7 +2459,15 @@ def create_prediction_scatter(model_metrics, model_name='ANN'):
         x=y_test,
         y=y_pred,
         mode='markers',
-        marker=dict(size=8, color='#3b82f6', opacity=0.6),
+        marker=dict(
+            size=5,
+            color=residuals,
+            colorscale='RdYlBu',
+            showscale=True,
+            colorbar=dict(title='<b>Residual</b>', x=1.02),
+            line=dict(width=0.3, color='white'),
+            opacity=0.6
+        ),
         name='Predictions',
         hovertemplate="Actual: %{x:.4f}<br>Predicted: %{y:.4f}<extra></extra>"
     ))
@@ -2087,34 +2484,88 @@ def create_prediction_scatter(model_metrics, model_name='ANN'):
     ))
     
     fig.update_layout(
-        title=dict(text=f"Predicted vs Actual Energy ({model_name})",
-                  font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="Actual Energy (Wh)",
-        yaxis_title="Predicted Energy (Wh)",
-        height=400,
-        font=dict(family='Source Sans 3'),
-        legend=dict(x=0.02, y=0.98)
+        title=dict(text=f"<b>{model_name}: Predicted vs Actual (R² = {r2:.4f})</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Actual Energy (Wh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Predicted Energy (Wh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=700,
+        width=700,
+        margin=dict(l=120, r=140, t=100, b=100),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        # Force 1:1 aspect ratio for scatter plots
+        xaxis=dict(
+            scaleanchor='y',
+            scaleratio=1,
+            constrain='domain',
+            tickfont=dict(size=32, color='#000000', family='Times New Roman')
+        ),
+        yaxis=dict(
+            constrain='domain',
+            tickfont=dict(size=32, color='#000000', family='Times New Roman')
+        )
     )
+
+    # Update colorbar title font
+    fig.update_coloraxes(colorbar=dict(title=dict(text='<b>Residual</b>', font=dict(size=32, color='#000000', family='Times New Roman')),
+                                       tickfont=dict(size=28, color='#000000', family='Times New Roman')))
     
     return fig
 
 
-def create_feature_importance_chart(feature_importance):
+def create_feature_importance_chart(feature_importance, model_name='MLR'):
     """
     Create horizontal bar chart for feature importance.
     Graph #5 in the dashboard.
     """
     if not feature_importance:
         return None
-    
+
+    # Extract feature importance for the specified model
+    model_importance = feature_importance
+    if isinstance(feature_importance, dict):
+        # Check if this is a nested dict with model names as keys
+        if model_name and model_name in feature_importance:
+            model_importance = feature_importance[model_name]
+        elif all(isinstance(v, dict) for v in feature_importance.values()):
+            # It's nested, get first available model
+            for key, value in feature_importance.items():
+                if isinstance(value, dict) and any(isinstance(v, (int, float)) for v in value.values()):
+                    model_importance = value
+                    break
+
+    # Ensure model_importance has numeric values
+    if not model_importance or not isinstance(model_importance, dict):
+        return None
+
+    # Filter to only include numeric values, skip any nested dicts or non-numeric values
+    numeric_importance = {}
+    for key, value in model_importance.items():
+        try:
+            if isinstance(value, (int, float)):
+                numeric_importance[key] = value
+            elif not isinstance(value, dict):
+                # Try to convert to float
+                numeric_importance[key] = float(value)
+        except (ValueError, TypeError):
+            # Skip items that can't be converted to numbers
+            continue
+
+    if not numeric_importance:
+        return None
+
     # Sort by importance
-    sorted_features = sorted(feature_importance.items(), key=lambda x: abs(x[1]), reverse=True)
-    features = [f[0] for f in sorted_features]
+    sorted_features = sorted(numeric_importance.items(), key=lambda x: abs(float(x[1])), reverse=True)
+    features = [f[0].replace('_', ' ').title() for f in sorted_features]
     importances = [abs(f[1]) for f in sorted_features]
     
     # Normalize to percentages
     total = sum(importances)
     percentages = [i/total * 100 for i in importances]
+    
+    colors = ['#e94560', '#3b82f6', '#10b981', '#f59e0b']
     
     fig = go.Figure()
     
@@ -2122,18 +2573,24 @@ def create_feature_importance_chart(feature_importance):
         y=features,
         x=percentages,
         orientation='h',
-        marker_color=['#e94560', '#3b82f6', '#10b981', '#f59e0b'],
-        text=[f"{p:.1f}%" for p in percentages],
-        textposition='auto'
+        marker_color=colors[:len(features)],
+        text=[f"<b>{p:.1f}%</b>" for p in percentages],
+        textposition='outside',
+        textfont=dict(size=32, family='Times New Roman', color='#000000')
     ))
-    
+
     fig.update_layout(
-        title=dict(text="Feature Importance for Energy Prediction",
-                  font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="Relative Importance (%)",
-        height=300,
-        font=dict(family='Source Sans 3'),
-        yaxis=dict(autorange='reversed')
+        title=dict(text="<b>Feature Importance for Energy Prediction</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Relative Importance (%)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=800,
+        width=900,
+        margin=dict(l=220, r=120, t=100, b=100),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        yaxis=dict(autorange='reversed', tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        xaxis=dict(range=[0, max(percentages) * 1.15], tickfont=dict(size=32, color='#000000', family='Times New Roman'))
     )
     
     return fig
@@ -2150,7 +2607,7 @@ def create_metrics_comparison_chart(results):
         'Energy (Wh)': [results[s]['totals']['energy_wh'] for s in strategies],
         'Carbon (g)': [results[s]['totals']['carbon_g'] for s in strategies],
         'Latency (ms)': [results[s]['totals']['avg_latency_ms'] for s in strategies],
-        'Peak UHI (°C×100)': [results[s]['totals']['peak_uhi'] * 100 for s in strategies],
+        'Peak ΔT-AR (°C×100)': [results[s]['totals']['peak_ΔT'] * 100 for s in strategies],
         'Heat CV (×100)': [results[s]['totals']['heat_cv'] * 100 for s in strategies]
     }
     
@@ -2168,52 +2625,156 @@ def create_metrics_comparison_chart(results):
         ))
     
     fig.update_layout(
-        title=dict(text="Performance Metrics by Strategy",
-                  font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="Routing Strategy",
+        title=dict(text="<b>Performance Metrics by Strategy</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Metric Value</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
         barmode='group',
-        height=450,
-        legend=dict(orientation='h', y=-0.15, x=0.5, xanchor='center'),
-        font=dict(family='Source Sans 3')
+        height=900,
+        margin=dict(l=100, r=60, t=120, b=200),
+        legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
+                   font=dict(size=32, family='Times New Roman', color='#000000')),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
     
     return fig
+def create_bayesopt_convergence_chart(model_results):
+    """
+    Plot Bayesian Optimization convergence:
+    validation R² per iteration + best-so-far curve.
+    """
+    try:
+        bay = model_results.get("Bayesian", {})
+        hist = bay.get("bo_history", None)
+        if not hist:
+            return None
+
+        iters = [h["iteration"] for h in hist if "iteration" in h]
+        vals = [h["val_r2"] for h in hist if "val_r2" in h]
+
+        if not iters or not vals:
+            return None
+
+        best_so_far = []
+        running = -1e9
+        for v in vals:
+            if v is None:
+                best_so_far.append(running)
+            else:
+                running = max(running, float(v))
+                best_so_far.append(running)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=iters, y=vals, mode="lines+markers", name="Val R²"))
+        fig.add_trace(go.Scatter(x=iters, y=best_so_far, mode="lines", name="Best so far"))
+
+        fig.update_layout(
+            title=dict(text="<b>Bayesian Optimization Convergence (Validation R²)</b>",
+                      font=dict(size=48, family='Times New Roman', color='#000000')),
+            xaxis_title=dict(text="<b>Iteration</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+            yaxis_title=dict(text="<b>Validation R²</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+            height=600,
+            margin=dict(l=100, r=60, t=120, b=140),
+            plot_bgcolor="white",
+            paper_bgcolor="white",
+            font=dict(family="Times New Roman", size=28, color='#000000'),
+            xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+            yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+            legend=dict(y=-0.3, x=0.5, xanchor='center', orientation='h', font=dict(size=32, color='#000000', family='Times New Roman'))
+        )
+        return fig
+    except Exception:
+        return None
 
 def create_learning_curve_chart(model_results):
-    """Create learning curve showing loss over epochs for neural networks"""
-    
-    fig = go.Figure()
-    colors = {'ANN': '#10b981', 'Bayesian': '#f59e0b'}
-    
+    """
+    ANN convergence plots.
+
+    Row 1: Training loss (MSE proxy from sklearn MLPRegressor.loss_curve_)
+    Row 2: Validation R² over epochs (only present when early_stopping=True)
+    """
+
+    series = []
     for name in ['ANN', 'Bayesian']:
         if name in model_results and isinstance(model_results[name], dict):
-            if 'loss_curve' in model_results[name]:
-                loss = model_results[name]['loss_curve']
-                epochs = list(range(1, len(loss) + 1))
-                
-                fig.add_trace(go.Scatter(
-                    x=epochs,
-                    y=loss,
-                    mode='lines+markers',
-                    name=name,
-                    line=dict(width=2, color=colors[name]),
-                    marker=dict(size=4)
-                ))
-    
-    if not fig.data:
+            loss = model_results[name].get('loss_curve', None)
+            val_scores = model_results[name].get('val_score_curve', None)
+            if loss is not None and len(loss) > 0:
+                series.append((name, list(loss), list(val_scores) if val_scores is not None else None))
+
+    if not series:
         return None
-    
-    fig.update_layout(
-        title='Neural Network Training: Loss Curve',
-        xaxis_title='Epoch',
-        yaxis_title='Loss (MSE)',
-        yaxis_type='log',
-        height=400,
-        showlegend=True,
-        hovermode='x unified'
+
+    has_val = any(v is not None and len(v) > 0 for _, _, v in series)
+    rows = 2 if has_val else 1
+    subplot_titles = ("Training loss (MSE)", "Validation R² (early stopping)") if has_val else ("Training loss (MSE)",)
+
+    fig = make_subplots(
+        rows=rows, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.25,
+        subplot_titles=subplot_titles
     )
-    
+
+    colors = {'ANN': '#10b981', 'Bayesian': '#f59e0b'}
+
+    for name, loss, val_scores in series:
+        epochs = list(range(1, len(loss) + 1))
+        fig.add_trace(
+            go.Scatter(
+                x=epochs, y=loss,
+                mode='lines+markers',
+                name=f"{name} loss",
+                line=dict(width=4, color=colors.get(name, '#6b7280'), shape='spline'),
+                marker=dict(size=8)
+            ),
+            row=1, col=1
+        )
+
+        if has_val and val_scores is not None and len(val_scores) > 0:
+            ve = list(range(1, len(val_scores) + 1))
+            fig.add_trace(
+                go.Scatter(
+                    x=ve, y=val_scores,
+                    mode='lines+markers',
+                    name=f"{name} val R²",
+                    line=dict(width=4, dash='dot', color=colors.get(name, '#6b7280'), shape='spline'),
+                    marker=dict(size=8)
+                ),
+                row=2, col=1
+            )
+
+    fig.update_yaxes(title_text="<b>Loss</b>", title_font=dict(size=36, color='#000000', family='Times New Roman'),
+                     tickfont=dict(size=32, color='#000000', family='Times New Roman'), row=1, col=1)
+    if has_val:
+        fig.update_yaxes(title_text="<b>R²</b>", title_font=dict(size=36, color='#000000', family='Times New Roman'),
+                        tickfont=dict(size=32, color='#000000', family='Times New Roman'), row=2, col=1)
+
+    fig.update_xaxes(title_text="<b>Epoch</b>", title_font=dict(size=36, color='#000000', family='Times New Roman'),
+                     tickfont=dict(size=32, color='#000000', family='Times New Roman'), row=rows, col=1)
+
+    fig.update_layout(
+        title=dict(text="<b>ANN Training Convergence</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        height=1200 if has_val else 700,
+        margin=dict(l=130, r=80, t=140, b=180),
+        hovermode='x unified',
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        legend=dict(orientation='h', y=-0.22, x=0.5, xanchor='center',
+                   font=dict(size=32, color='#000000', family='Times New Roman'))
+    )
+
+    # Update subplot titles with larger fonts
+    fig.update_annotations(font=dict(size=36, family='Times New Roman', color='#000000'))
+
     return fig
+
 
 def create_heat_distribution_chart(results):
     """
@@ -2231,7 +2792,7 @@ def create_heat_distribution_chart(results):
         values = []
         for strategy in strategies:
             dc_data = results[strategy]['datacenters'].get(dc_name, {})
-            values.append(dc_data.get('heat_kwh', 0))
+            values.append(dc_data.get('heat_wh', 0))
         
         short_name = dc_name.split(',')[0]
         climate = DEFAULT_DATACENTERS.get(dc_name, {}).get('climate', 'moderate')
@@ -2241,19 +2802,26 @@ def create_heat_distribution_chart(results):
             x=strategies,
             y=values,
             marker_color=climate_colors.get(climate, '#6b7280'),
-            text=[f"{v:.2f}" for v in values],
-            textposition='auto'
+            text=[f"<b>{v:,.0f}</b>" for v in values],
+            textposition='auto',
+            textfont=dict(size=28, color='#000000', family='Times New Roman')
         ))
-    
+
     fig.update_layout(
-        title=dict(text="Heat Distribution by Datacenter (kWh)",
-                  font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="Routing Strategy",
-        yaxis_title="Heat Dissipation (kWh)",
+        title=dict(text="<b>Heat Distribution by Datacenter (Wh)</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Heat Dissipation (Wh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
         barmode='stack',
-        height=400,
-        legend=dict(orientation='h', y=-0.15, x=0.5, xanchor='center'),
-        font=dict(family='Source Sans 3')
+        height=900,
+        margin=dict(l=100, r=60, t=120, b=200),
+        legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
+                   font=dict(size=32, family='Times New Roman', color='#000000')),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
     
     return fig
@@ -2266,20 +2834,23 @@ def create_monte_carlo_boxplots(mc_results):
     """
     fig = make_subplots(
         rows=2, cols=2,
-        subplot_titles=("Energy (Wh)", "Peak UHI (°C)", "Heat CV", "Carbon (g)")
+        subplot_titles=("Energy (Wh)", "Peak ΔT-AR (°C)", "Heat CV", "Carbon (g)"),
+        vertical_spacing=0.25,
+        horizontal_spacing=0.15
     )
     
     strategies = list(mc_results.keys())
     colors = {
         'Random': '#6b7280',
         'Energy-Only': '#dc2626',
-        'UHI-Aware': '#10b981',
+        'ΔT-AR': '#10b981',
+        'Heat-Only': '#9333ea',
         'Multi-Objective': '#3b82f6'
     }
     
     metrics = [
         ('energy_wh', 1, 1),
-        ('peak_uhi', 1, 2),
+        ('peak_ΔT', 1, 2),
         ('heat_cv', 2, 1),
         ('carbon_g', 2, 2)
     ]
@@ -2296,15 +2867,180 @@ def create_monte_carlo_boxplots(mc_results):
             ), row=row, col=col)
     
     fig.update_layout(
-        title=dict(text="Monte Carlo Simulation Results (95% CI)",
-                  font=dict(size=16, family='Source Serif 4')),
-        height=600,
-        font=dict(family='Source Sans 3'),
+        title=dict(text="<b>Monte Carlo Simulation Results (95% CI)</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        height=1400,
+        margin=dict(l=120, r=80, t=140, b=220),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
         showlegend=True,
-        legend=dict(orientation='h', y=-0.1, x=0.5, xanchor='center')
+        legend=dict(orientation='h', y=-0.20, x=0.5, xanchor='center',
+                   font=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
+
+    # Update subplot titles and axis labels with larger fonts
+    fig.update_annotations(font=dict(size=36, family='Times New Roman', color='#000000'))
+    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
+    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
     
     return fig
+
+def create_monte_carlo_mean_ci_chart(mc_results):
+    """
+    Mean ± 95% CI of the MEAN (not the percentile interval).
+    """
+    metrics = [
+        ("energy_wh", "Energy (Wh)"),
+        ("peak_ΔT", "Peak ΔT-AR (°C)"),
+        ("heat_cv", "Heat CV"),
+        ("carbon_g", "Carbon (g)")
+    ]
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[m[1] for m in metrics],
+        vertical_spacing=0.25,
+        horizontal_spacing=0.15
+    )
+
+    strategies = list(mc_results.keys())
+    colors = {
+        'Random': '#6b7280',
+        'Energy-Only': '#dc2626',
+        'ΔT-AR': '#10b981',
+        'Multi-Objective': '#3b82f6'
+    }
+
+    for i, (metric, label) in enumerate(metrics):
+        r = 1 if i < 2 else 2
+        c = 1 if i % 2 == 0 else 2
+
+        means, err_plus, err_minus = [], [], []
+        for s in strategies:
+            data = mc_results[s]['raw_data'][metric].values
+            n = len(data)
+            mean = float(np.mean(data))
+            sem = float(np.std(data, ddof=1) / np.sqrt(n)) if n > 1 else 0.0
+            ci = 1.96 * sem
+            means.append(mean)
+            err_plus.append(ci)
+            err_minus.append(ci)
+
+        fig.add_trace(
+            go.Bar(
+                x=strategies,
+                y=means,
+                error_y=dict(type='data', array=err_plus, arrayminus=err_minus, visible=True),
+                marker_color=[colors.get(s, '#6b7280') for s in strategies],
+                showlegend=False
+            ),
+            row=r, col=c
+        )
+
+    fig.update_layout(
+        title=dict(text="<b>Monte Carlo: Mean ± 95% CI of the Mean</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        height=1400,
+        margin=dict(l=120, r=80, t=140, b=160),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
+    )
+
+    # Update subplot titles and axis labels with larger fonts
+    fig.update_annotations(font=dict(size=36, family='Times New Roman', color='#000000'))
+    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
+    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
+    return fig
+
+
+def create_monte_carlo_hist_overlay(mc_results, metric="peak_ΔT", title=None, x_label=None):
+    """
+    Distribution overlay plot (histogram density) for a single Monte Carlo metric.
+    """
+    strategies = list(mc_results.keys())
+    colors = {
+        'Random': '#6b7280',
+        'Energy-Only': '#dc2626',
+        'ΔT-AR': '#10b981',
+        'Multi-Objective': '#3b82f6'
+    }
+
+    fig = go.Figure()
+    for s in strategies:
+        data = mc_results[s]['raw_data'][metric].values
+        fig.add_trace(go.Histogram(
+            x=data,
+            histnorm='probability density',
+            name=s,
+            opacity=0.55,
+            marker_color=colors.get(s, '#6b7280')
+        ))
+
+        mu = float(np.mean(data))
+        fig.add_vline(x=mu, line_width=2, line_dash="dot", line_color=colors.get(s, '#6b7280'))
+
+    fig.update_layout(
+        barmode='overlay',
+        title=dict(text=title or f"Monte Carlo Distribution Overlay: {metric}",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text=x_label or metric, font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Density</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=650,
+        margin=dict(l=110, r=60, t=120, b=140),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        legend=dict(orientation='h', y=-0.3, x=0.5, xanchor='center',
+                   font=dict(size=32, color='#000000', family='Times New Roman'))
+    )
+    return fig
+
+
+def create_monte_carlo_running_mean_chart(mc_results, metric="peak_ΔT", title=None, y_label=None):
+    """
+    Running mean (convergence) plot to show stability as #runs increases.
+    """
+    strategies = list(mc_results.keys())
+    colors = {
+        'Random': '#6b7280',
+        'Energy-Only': '#dc2626',
+        'ΔT-AR': '#10b981',
+        'Multi-Objective': '#3b82f6'
+    }
+
+    fig = go.Figure()
+    for s in strategies:
+        data = mc_results[s]['raw_data'][metric].values
+        running = pd.Series(data).expanding().mean().values
+        fig.add_trace(go.Scatter(
+            x=list(range(1, len(running) + 1)),
+            y=running,
+            mode='lines',
+            name=s,
+            line=dict(width=2, color=colors.get(s, '#6b7280'))
+        ))
+
+    fig.update_layout(
+        title=dict(text=title or f"Monte Carlo Convergence: Running Mean of {metric}",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Monte Carlo run index</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text=y_label or metric, font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=650,
+        margin=dict(l=110, r=60, t=120, b=140),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        legend=dict(orientation='h', y=-0.3, x=0.5, xanchor='center',
+                   font=dict(size=32, color='#000000', family='Times New Roman'))
+    )
+    return fig
+
 
 
 def create_sensitivity_temperature_chart(sensitivity_data):
@@ -2317,7 +3053,7 @@ def create_sensitivity_temperature_chart(sensitivity_data):
     colors = {
         'Random': '#6b7280',
         'Energy-Only': '#dc2626',
-        'UHI-Aware': '#10b981',
+        'ΔT-AR': '#10b981',
         'Multi-Objective': '#3b82f6'
     }
     
@@ -2332,13 +3068,18 @@ def create_sensitivity_temperature_chart(sensitivity_data):
         ))
     
     fig.update_layout(
-        title=dict(text="Temperature Sensitivity Analysis",
-                  font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="Ambient Temperature (°C)",
-        yaxis_title="Peak UHI (°C)",
-        height=400,
-        font=dict(family='Source Sans 3'),
-        legend=dict(x=0.02, y=0.98)
+        title=dict(text="<b>Temperature Sensitivity Analysis</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Ambient Temperature (°C)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Peak ΔT-AR (°C)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=800,
+        margin=dict(l=110, r=60, t=120, b=100),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
     
     return fig
@@ -2384,14 +3125,18 @@ def create_carbon_intensity_curves():
                   annotation_text=f"Current: {current_hour}:00")
     
     fig.update_layout(
-        title=dict(text="24-Hour Carbon Intensity Patterns",
-                  font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="Hour of Day",
-        yaxis_title="Carbon Intensity (kg CO₂/kWh)",
-        height=400,
-        font=dict(family='Source Sans 3'),
-        legend=dict(x=0.02, y=0.98),
-        xaxis=dict(tickmode='linear', tick0=0, dtick=4)
+        title=dict(text="<b>24-Hour Carbon Intensity Patterns</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Hour of Day</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Carbon Intensity (kg CO₂/kWh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=800,
+        margin=dict(l=110, r=60, t=120, b=100),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Times New Roman')),
+        xaxis=dict(tickmode='linear', tick0=0, dtick=4, tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
     
     return fig
@@ -2424,17 +3169,22 @@ def create_cooling_effectiveness_heatmap():
         colorscale=colorscale,
         text=[['✗' if v < 0.4 else '○' if v < 0.8 else '✓' for v in row] for row in effectiveness],
         texttemplate="%{text}",
-        textfont=dict(size=16),
+        textfont=dict(size=36, color='#000000', family='Times New Roman'),
         hovertemplate="Cooling: %{y}<br>Climate: %{x}<br>Effectiveness: %{z:.0%}<extra></extra>"
     ))
-    
+
     fig.update_layout(
-        title=dict(text="Cooling Effectiveness by Climate Type",
-                  font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="Climate Type",
-        yaxis_title="Cooling Technology",
-        height=350,
-        font=dict(family='Source Sans 3')
+        title=dict(text="<b>Cooling Effectiveness by Climate Type</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Climate Type</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Cooling Technology</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=800,
+        margin=dict(l=240, r=80, t=120, b=100),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
     
     return fig
@@ -2462,17 +3212,23 @@ def create_pue_comparison_chart():
         x=pues,
         orientation='h',
         marker_color=colors,
-        text=[f"PUE: {p:.2f}" for p in pues],
-        textposition='auto'
+        text=[f"<b>PUE: {p:.2f}</b>" for p in pues],
+        textposition='outside',
+        textfont=dict(size=32, family='Times New Roman', color='#000000')
     ))
-    
+
     fig.update_layout(
-        title=dict(text="Power Usage Effectiveness (PUE) by Cooling Technology",
-                  font=dict(size=16, family='Source Serif 4')),
-        xaxis_title="PUE Value (lower is better)",
-        height=350,
-        font=dict(family='Source Sans 3'),
-        xaxis=dict(range=[1.0, 2.0])
+        title=dict(text="<b>Power Usage Effectiveness (PUE) by Cooling Technology</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>PUE Value (lower is better)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=800,
+        width=900,
+        margin=dict(l=280, r=140, t=120, b=100),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        xaxis=dict(range=[1.0, 2.2], tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
     
     return fig
@@ -2483,11 +3239,11 @@ def create_scenario_comparison_chart(scenario_a, scenario_b, scenario_a_name, sc
     Create grouped bar chart for scenario comparison.
     Graph #16 in the dashboard.
     """
-    metrics = ['energy_wh', 'carbon_g', 'avg_latency_ms', 'peak_uhi', 'heat_cv']
-    metric_labels = ['Energy (Wh)', 'Carbon (g)', 'Latency (ms)', 'Peak UHI (°C)', 'Heat CV']
+    metrics = ['energy_wh', 'carbon_g', 'avg_latency_ms', 'peak_ΔT', 'heat_cv']
+    metric_labels = ['Energy (Wh)', 'Carbon (g)', 'Latency (ms)', 'Peak ΔT-AR (°C)', 'Heat CV']
     
-    values_a = [scenario_a['totals'][m] if m != 'peak_uhi' else scenario_a['totals'][m] * 100 for m in metrics]
-    values_b = [scenario_b['totals'][m] if m != 'peak_uhi' else scenario_b['totals'][m] * 100 for m in metrics]
+    values_a = [scenario_a['totals'][m] if m != 'peak_ΔT' else scenario_a['totals'][m] * 100 for m in metrics]
+    values_b = [scenario_b['totals'][m] if m != 'peak_ΔT' else scenario_b['totals'][m] * 100 for m in metrics]
     
     fig = go.Figure()
     
@@ -2506,16 +3262,100 @@ def create_scenario_comparison_chart(scenario_a, scenario_b, scenario_a_name, sc
     ))
     
     fig.update_layout(
-        title=dict(text="Scenario Comparison",
-                  font=dict(size=16, family='Source Serif 4')),
+        title=dict(text="<b>Scenario Comparison</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Metrics</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Value</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
         barmode='group',
-        height=400,
-        font=dict(family='Source Sans 3'),
-        legend=dict(orientation='h', y=-0.15, x=0.5, xanchor='center')
+        height=900,
+        margin=dict(l=100, r=60, t=120, b=180),
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        legend=dict(orientation='h', y=-0.25, x=0.5, xanchor='center',
+                   font=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
     
     return fig
 
+
+def create_train_val_test_comparison(model_results):
+    """Create comparison chart showing train/val/test metrics"""
+
+    models = []
+    train_r2 = []
+    val_r2 = []
+    test_r2 = []
+
+    for name in ['MLR', 'ANN', 'Bayesian']:
+        if name in model_results and isinstance(model_results[name], dict):
+            if 'train_r2' in model_results[name]:
+                models.append(name)
+                train_r2.append(model_results[name]['train_r2'])
+                val_r2.append(model_results[name]['val_r2'])
+                test_r2.append(model_results[name]['r2'])
+
+    if not models:
+        return None
+
+    fig = go.Figure()
+
+    # Convert to horizontal bars
+    fig.add_trace(go.Bar(
+        name='Training',
+        y=models,
+        x=train_r2,
+        orientation='h',
+        marker_color='#3b82f6',
+        text=[f"<b>{v:.4f}</b>" for v in train_r2],
+        textposition='outside',
+        textfont=dict(size=28, family='Times New Roman', color='#000000')
+    ))
+
+    fig.add_trace(go.Bar(
+        name='Validation',
+        y=models,
+        x=val_r2,
+        orientation='h',
+        marker_color='#10b981',
+        text=[f"<b>{v:.4f}</b>" for v in val_r2],
+        textposition='outside',
+        textfont=dict(size=28, family='Times New Roman', color='#000000')
+    ))
+
+    fig.add_trace(go.Bar(
+        name='Test',
+        y=models,
+        x=test_r2,
+        orientation='h',
+        marker_color='#f59e0b',
+        text=[f"<b>{v:.4f}</b>" for v in test_r2],
+        textposition='outside',
+        textfont=dict(size=28, family='Times New Roman', color='#000000')
+    ))
+
+    fig.update_layout(
+        title=dict(text='Model Performance: Train vs Validation vs Test',
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        xaxis=dict(title=dict(text='R² Score', font=dict(size=36, family='Times New Roman', color='#000000')),
+                  range=[0, 1.08], tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(title=dict(text='Model', font=dict(size=36, family='Times New Roman', color='#000000')),
+                  tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        barmode='group',
+        height=600,
+        width=1000,
+        margin=dict(l=120, r=180, t=120, b=180),
+        showlegend=True,
+        legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
+                   font=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        font=dict(family='Times New Roman', size=28, color='#000000')
+    )
+
+    return fig
 
 # ============================================================================
 # RECOMMENDATION GENERATORS (All Dynamic)
@@ -2537,7 +3377,7 @@ def generate_initial_recommendation(datacenters, weather_data, user_location, la
         
         # Calculate metrics
         distance = haversine_distance(user_lat, user_lon, dc_info['lat'], dc_info['lon'])
-        latency = calculate_latency(distance)
+        latency = calculate_latency(distance, load_fraction=0.7)
         temp = weather.get('temperature', 20)
         cooling = dc_info.get('default_cooling', 'air_economizer')
         energy = calculate_energy_per_request(temp, weather.get('humidity', 50), cooling)
@@ -2559,7 +3399,7 @@ def generate_initial_recommendation(datacenters, weather_data, user_location, la
                 0.35 * (energy / 0.6) +  # Energy normalized
                 0.25 * (latency / latency_threshold) +  # Latency normalized
                 0.25 * (carbon / 0.5) +  # Carbon normalized
-                0.15 * (max(0, temp - 20) / 20)  # UHI risk normalized
+                0.15 * (max(0, temp - 20) / 20)  # ΔT-AR risk normalized
             )
     
     if not scores:
@@ -2616,13 +3456,13 @@ def generate_final_recommendation(results, latency_threshold):
     """
     strategies = list(results.keys())
     
-    # Find best strategy for UHI reduction
-    uhi_scores = {s: results[s]['totals']['peak_uhi'] for s in strategies}
-    best_uhi = min(uhi_scores, key=lambda s: uhi_scores[s])
+    # Find best strategy for ΔT-AR reduction
+    ΔT_scores = {s: results[s]['totals']['peak_ΔT'] for s in strategies}
+    best_ΔT = min(ΔT_scores, key=lambda s: ΔT_scores[s])
     
     # Calculate improvements vs Energy-Only
     energy_only = results['Energy-Only']['totals']
-    best = results[best_uhi]['totals']
+    best = results[best_ΔT]['totals']
 
     latency_info = {}
     for strategy_name, data in results.items():
@@ -2630,23 +3470,21 @@ def generate_final_recommendation(results, latency_threshold):
         if avg_latency is None:
             continue
 
-        if avg_latency <= latency_threshold:
-            status = "within latency SLO"
-        else:
-            status = "violates latency SLO"
+        status = "within latency SLO" if avg_latency <= latency_threshold else "violates latency SLO"
 
-    latency_info[strategy_name] = {
-        "avg_latency_ms": avg_latency,
-        "status": status,
-        "threshold_ms": latency_threshold,
-    }
+        latency_info[strategy_name] = {
+            "avg_latency_ms": avg_latency,
+            "status": status,
+            "threshold_ms": latency_threshold,
+        }
+
     
     improvements = {}
     
-    if energy_only['peak_uhi'] > 0:
-        improvements['uhi_reduction_pct'] = ((energy_only['peak_uhi'] - best['peak_uhi']) / energy_only['peak_uhi']) * 100
+    if energy_only['peak_ΔT'] > 0:
+        improvements['ΔT_reduction_pct'] = ((energy_only['peak_ΔT'] - best['peak_ΔT']) / energy_only['peak_ΔT']) * 100
     else:
-        improvements['uhi_reduction_pct'] = 0
+        improvements['ΔT_reduction_pct'] = 0
     
     if energy_only['heat_cv'] > 0:
         improvements['cv_reduction_pct'] = ((energy_only['heat_cv'] - best['heat_cv']) / energy_only['heat_cv']) * 100
@@ -2679,15 +3517,15 @@ def generate_final_recommendation(results, latency_threshold):
             else:
                 reasoning.append(
                     f"⚠️ Average latency ({best_latency:.1f} ms) exceeds the target of {latency_threshold} ms; "
-                    f"this strategy trades some latency for energy/UHI benefits."
+                    f"this strategy trades some latency for energy/ΔT-AR benefits."
                 )    
     
-    if improvements['uhi_reduction_pct'] > 40:
-        reasoning.append(f"✅ {improvements['uhi_reduction_pct']:.1f}% reduction in Peak UHI")
-    elif improvements['uhi_reduction_pct'] > 20:
-        reasoning.append(f"✅ {improvements['uhi_reduction_pct']:.1f}% reduction in Peak UHI")
-    elif improvements['uhi_reduction_pct'] > 0:
-        reasoning.append(f"✅ {improvements['uhi_reduction_pct']:.1f}% reduction in Peak UHI")
+    if improvements['ΔT_reduction_pct'] > 40:
+        reasoning.append(f"✅ {improvements['ΔT_reduction_pct']:.1f}% reduction in Peak ΔT-AR")
+    elif improvements['ΔT_reduction_pct'] > 20:
+        reasoning.append(f"✅ {improvements['ΔT_reduction_pct']:.1f}% reduction in Peak ΔT-AR")
+    elif improvements['ΔT_reduction_pct'] > 0:
+        reasoning.append(f"✅ {improvements['ΔT_reduction_pct']:.1f}% reduction in Peak ΔT-AR")
     
     if improvements['cv_reduction_pct'] > 50:
         reasoning.append(f"✅ {improvements['cv_reduction_pct']:.1f}% reduction in heat concentration")
@@ -2705,7 +3543,7 @@ def generate_final_recommendation(results, latency_threshold):
         reasoning.append(f"❌ {improvements['energy_overhead_pct']:.1f}% energy overhead (significant)")
     
     return {
-        'recommended_strategy': best_uhi,
+        'recommended_strategy': best_ΔT,
         'improvements': improvements,
         'reasoning': reasoning,
         'energy_only_metrics': energy_only,
@@ -2721,23 +3559,23 @@ def calculate_statistical_significance(mc_results):
     if 'Energy-Only' not in mc_results or 'Multi-Objective' not in mc_results:
         return None
     
-    energy_only_uhi = mc_results['Energy-Only']['raw_data']['peak_uhi']
-    multi_obj_uhi = mc_results['Multi-Objective']['raw_data']['peak_uhi']
+    energy_only_ΔT = mc_results['Energy-Only']['raw_data']['peak_ΔT']
+    multi_obj_ΔT = mc_results['Multi-Objective']['raw_data']['peak_ΔT']
     
     # Welch's t-test
-    t_stat, p_value = stats.ttest_ind(energy_only_uhi, multi_obj_uhi, equal_var=False)
+    t_stat, p_value = stats.ttest_ind(energy_only_ΔT, multi_obj_ΔT, equal_var=False)
     
     # Ensure p_value is a Python float (convert numpy scalar to native Python float)
     p_value = float(np.asarray(p_value).item())
     
     # Effect size (Cohen's d)
-    pooled_std = np.sqrt((energy_only_uhi.var() + multi_obj_uhi.var()) / 2)
-    cohens_d = (energy_only_uhi.mean() - multi_obj_uhi.mean()) / pooled_std if pooled_std > 0 else 0
+    pooled_std = np.sqrt((energy_only_ΔT.var() + multi_obj_ΔT.var()) / 2)
+    cohens_d = (energy_only_ΔT.mean() - multi_obj_ΔT.mean()) / pooled_std if pooled_std > 0 else 0
     
     # Confidence interval for difference
-    mean_diff = energy_only_uhi.mean() - multi_obj_uhi.mean()
-    se_diff = np.sqrt(energy_only_uhi.var()/len(energy_only_uhi) + 
-                      multi_obj_uhi.var()/len(multi_obj_uhi))
+    mean_diff = energy_only_ΔT.mean() - multi_obj_ΔT.mean()
+    se_diff = np.sqrt(energy_only_ΔT.var()/len(energy_only_ΔT) + 
+                      multi_obj_ΔT.var()/len(multi_obj_ΔT))
     ci_lower = mean_diff - 1.96 * se_diff
     ci_upper = mean_diff + 1.96 * se_diff
     
@@ -2763,72 +3601,28 @@ def calculate_statistical_significance(mc_results):
         'cohens_d': cohens_d,
         'significance': significance,
         'significant': significant,
-        'sample_size': len(energy_only_uhi)
+        'sample_size': len(energy_only_ΔT)
     }
+# ---- Cache weather to avoid re-fetching every rerun ----
+@st.cache_data(ttl=1800, show_spinner=False)  # 30 min cache
+def cached_weather(lat, lon, name, climate_hint=None):
+    lat = round(float(lat), 4)
+    lon = round(float(lon), 4)
 
-def create_train_val_test_comparison(model_results):
-    """Create comparison chart showing train/val/test metrics"""
-    
-    models = []
-    train_r2 = []
-    val_r2 = []
-    test_r2 = []
-    
-    for name in ['MLR', 'ANN', 'Bayesian']:
-        if name in model_results and isinstance(model_results[name], dict):
-            if 'train_r2' in model_results[name]:
-                models.append(name)
-                train_r2.append(model_results[name]['train_r2'])
-                val_r2.append(model_results[name]['val_r2'])
-                test_r2.append(model_results[name]['r2'])
-    
-    if not models:
-        return None
-    
-    fig = go.Figure()
-    
-    x = np.arange(len(models))
-    width = 0.25
-    
-    fig.add_trace(go.Bar(
-        name='Training',
-        x=x - width,
-        y=train_r2,
-        marker_color='#3b82f6',
-        text=[f'{v:.4f}' for v in train_r2],
-        textposition='outside'
-    ))
-    
-    fig.add_trace(go.Bar(
-        name='Validation',
-        x=x,
-        y=val_r2,
-        marker_color='#10b981',
-        text=[f'{v:.4f}' for v in val_r2],
-        textposition='outside'
-    ))
-    
-    fig.add_trace(go.Bar(
-        name='Test',
-        x=x + width,
-        y=test_r2,
-        marker_color='#f59e0b',
-        text=[f'{v:.4f}' for v in test_r2],
-        textposition='outside'
-    ))
-    
-    fig.update_layout(
-        title='Model Performance: Train vs Validation vs Test',
-        xaxis=dict(ticktext=models, tickvals=x, title='Model'),
-        yaxis=dict(title='R² Score', range=[0, 1.05]),
-        barmode='group',
-        height=400,
-        showlegend=True,
-        legend=dict(x=0.7, y=1.0)
-    )
-    
-    return fig
+    data = fetch_weather_data(lat, lon, name, climate_hint)
 
+    # ✅ Important: NEVER cache None / broken payloads
+    if data is None or not isinstance(data, dict):
+        raise RuntimeError(f"Weather fetch failed (None/invalid) for {name} ({lat}, {lon})")
+
+    # Accept current-only payloads from Open-Meteo; don't require hourly/daily.
+    if all(key not in data for key in ("temperature", "humidity", "wind_speed")):
+        raise RuntimeError(f"Weather response missing current fields for {name} ({lat}, {lon})")
+
+    if "error" in data:
+        raise RuntimeError(f"Weather API error for {name}: {data['error']}")
+
+    return data
 
 # ============================================================================
 # MAIN STREAMLIT APPLICATION
@@ -2844,10 +3638,10 @@ def main():
     st.markdown("""
     <div style="text-align: center; padding: 1.5rem 0;">
         <h1 style="font-family: 'Source Serif 4', serif; font-size: 2.2rem; color: #1a1a2e; margin-bottom: 0.5rem;">
-            🌡️ AI-Assisted Datacenter Prompt Routing for UHI Mitigation
+            🌡️ AI-Assisted Datacenter Prompt Routing for ΔT-AR Mitigation
         </h1>
         <p style="font-family: 'Source Sans 3', sans-serif; color: #4a5568; font-size: 1.1rem; margin-bottom: 0.25rem;">
-            Demonstrating the usage of AI to mitigate the UHI (Urban Heat Island) effect caused by datacenters
+            Demonstrating the usage of AI to mitigate the ΔT-AR (Delta-T Aware Routing) effect caused by datacenters
         </p>
         <p style="font-family: 'Source Sans 3', sans-serif; color: #718096; font-size: 0.9rem;">
             Phani Raja Bharath Balijepalli | IDS6938 - AI, Energy, and Sustainability | 
@@ -2863,7 +3657,7 @@ def main():
         to the exterior environment. <strong>The heat doesn't disappear — it dissipates locally.</strong> 
         Combined with carbon emissions from energy generation, there is no escape from the thermal impact 
         of computation. This dashboard demonstrates how routing strategy choice can mitigate localized 
-        Urban Heat Island (UHI) effects.
+        Delta-T Aware Routing (ΔT-AR) effects.
     </div>
     """, unsafe_allow_html=True)
 
@@ -2883,8 +3677,8 @@ def main():
                 <td style="color: #666;">E_base = 0.3 Wh (Stern, 2025)</td>
             </tr>
             <tr>
-                <td><strong>UHI:</strong></td>
-                <td><code>UHII = α × (Q/A) × 1/(1 + β × wind)</code></td>
+                <td><strong>ΔT-AR:</strong></td>
+                <td><code>ΔT = α × (Q/A) × 1/(1 + β × wind)</code></td>
                 <td style="color: #666;">Physics-based model</td>
             </tr>
             <tr>
@@ -2903,12 +3697,14 @@ def main():
     st.markdown('<div class="section-header">📍 SECTION 1: Experimental Setup</div>', unsafe_allow_html=True)
     st.markdown("*Configure your simulation parameters below*")
     
+    # Initialize AI models BEFORE expander (global scope)
+    ai_models = AIModelSuite()
+    
     with st.expander("⚙️ Configure Your Experiment", expanded=True):
         
         # 1.1 User Location
         st.markdown('<div class="subsection-header">1.1 User Location</div>', unsafe_allow_html=True)
-
-        # Persistent storage for user location
+     # Persistent storage for user location
         if "user_lat" not in st.session_state:
             st.session_state.user_lat = 28.5383   # Orlando default
             st.session_state.user_lon = -81.3792
@@ -2971,94 +3767,142 @@ def main():
         user_weather = fetch_weather_data(
             st.session_state.user_lat,
             st.session_state.user_lon,
-            st.session_state.user_label
+            st.session_state.user_label,
+            "moderate"  # default climate hint
         )
 
+        st.markdown('<div class="subsection-header">Figure export (paper layout)</div>', unsafe_allow_html=True)
+
+        preset_name = st.selectbox(
+            "Export preset",
+            list(FIG_EXPORT_PRESETS.keys()),
+            index=0
+        )
+        st.session_state["fig_export_cfg"] = FIG_EXPORT_PRESETS[preset_name]
 
         st.markdown(f"""
         <div class="info-box">
             <strong>📡 Your Location Weather:</strong> 
             🌡️ {user_weather['temperature']:.1f}°C | 
             💧 {user_weather['humidity']:.0f}% | 
-            💨 {user_weather['wind_speed']:.1f} m/s
+            💨 {user_weather['wind_speed']:.1f} m/s |
+            📊 {user_weather.get('pressure', 1013.25):.0f} hPa |
+            ☀️ {user_weather.get('solar_radiation', 0):.0f} W/m²         
             <br><small>Source: {user_weather['source']}</small>
         </div>
         """, unsafe_allow_html=True)
 
         # 1.2 Datacenter Selection
         st.markdown('<div class="subsection-header">1.2 Datacenter Selection (1-3)</div>', unsafe_allow_html=True)
-        
-        # Initialize session state for datacenters (persistent across reruns)
-        if 'selected_dcs' not in st.session_state:
-            st.session_state.selected_dcs = list(DEFAULT_DATACENTERS.keys())
-        
-        # Combine default and extended datacenters to create all available options
-        all_datacenters = {}
-        
-        # Add default datacenters (already have full info)
+
+        # ---- Build all datacenters WITHOUT calling weather here ----
+        all_datacenters: dict[str, dict[str, Any]] = {}
+
         for dc_name, dc_info in DEFAULT_DATACENTERS.items():
             all_datacenters[dc_name] = dc_info.copy()
-        
-        # Add extended datacenters (need to enrich with climate info)
+
         for dc_name, loc in EXTENDED_DC_LOCATIONS.items():
-            # Fetch weather to classify climate
-            weather = fetch_weather_data(loc['lat'], loc['lon'], dc_name)
-            climate_info = classify_climate(weather['temperature'], weather['humidity'])
-            
             all_datacenters[dc_name] = {
-                'lat': loc['lat'],
-                'lon': loc['lon'],
-                'region': loc['region'],
-                'climate': loc['climate'],
-                'climate_detail': climate_info['climate_detail'],
-                'default_cooling': climate_info['recommended_cooling'],
-                'description': f"{loc['climate'].title()} climate datacenter",
-                'emoji': climate_info['emoji']
+                "lat": loc["lat"],
+                "lon": loc["lon"],
+                "region": loc.get("region", "default"),
+                "climate": loc.get("climate", "unknown"),
+                "description": f"{loc.get('climate', 'unknown').title()} climate datacenter",
+                "emoji": "🏢",  # will enrich after weather fetch
+                "climate_detail": None,
+                "default_cooling": None,
             }
-        
-        # Fetch weather for all datacenters
-        dc_weather_data = {}
-        dc_details = {}
-        
-        for dc_name, dc_info in all_datacenters.items():
-            weather = fetch_weather_data(dc_info['lat'], dc_info['lon'], dc_name)
-            dc_weather_data[dc_name] = weather
-            
-            distance = haversine_distance(user_location[0], user_location[1], dc_info['lat'], dc_info['lon'])
-            latency = calculate_latency(distance)
-            region = dc_info.get('region', 'default')
-            carbon = get_carbon_intensity(region)
-            
-            dc_details[dc_name] = {
-                'distance': distance,
-                'latency': latency,
-                'carbon': carbon,
-                'weather': weather
-            }
-        
-        # Display DC selection with all available options
-        selected_dc_names = st.multiselect(
-            "Select Datacenters",
-            options=sorted(list(all_datacenters.keys())),
+
+        # ---- Initialize selection state ----
+        if "selected_dcs" not in st.session_state:
+            # default: pick first 3 (not ALL)
+            st.session_state.selected_dcs = list(all_datacenters.keys())[:3]
+
+        # ---- UI: select 1–3 datacenters ----
+        selected_dcs = st.multiselect(
+            "Choose 1–3 datacenters",
+            options=list(all_datacenters.keys()),
             default=st.session_state.selected_dcs,
-            key="selected_dcs_multiselect",
-            help="Select 1 to 3 datacenters from any global location"
         )
-        
-        # Update session state with current selection
-        st.session_state.selected_dcs = selected_dc_names
+
+        # persist selection
+        st.session_state.selected_dcs = selected_dcs
+
+        # enforce 1–3
+        if not (1 <= len(selected_dcs) <= 3):
+            st.warning("Please select between 1 and 3 datacenters.")
+            st.stop()
+
+        # ---- Fetch weather ONLY for selected, with progress ----
+        dc_weather_data: dict[str, dict[str, Any]] = {}
+        dc_details: dict[str, dict[str, Any]] = {}
+
+        total_dcs = len(selected_dcs)
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+
+        for idx, dc_name in enumerate(selected_dcs, 1):
+            dc_info = all_datacenters[dc_name]
+            weather = {}
+
+            progress_text.text(f"🌐 Fetching weather data... ({idx}/{total_dcs})")
+            progress_bar.progress(idx / total_dcs)
+
+            try:
+                climate_hint = dc_info.get("climate_detail") or dc_info.get("climate") or "moderate"
+                weather = cached_weather(dc_info["lat"], dc_info["lon"], dc_name, climate_hint)
+
+
+            except Exception as e:
+                weather = {"error": str(e), "temperature": None, "humidity": None}
+
+            dc_weather_data[dc_name] = weather
+
+            # climate enrichment (guard against missing values)
+            temp = weather.get("temperature")
+            hum = weather.get("humidity")
+
+            if temp is not None and hum is not None:
+                climate_info = classify_climate(temp, hum)
+                all_datacenters[dc_name]["climate_detail"] = climate_info.get("climate_detail")
+                all_datacenters[dc_name]["default_cooling"] = climate_info.get("recommended_cooling")
+                all_datacenters[dc_name]["emoji"] = climate_info.get("emoji", "🏢")
+
+            # distance/latency/carbon (guard user_location existence)
+            distance = haversine_distance(user_location[0], user_location[1], dc_info["lat"], dc_info["lon"])
+            latency = calculate_latency(distance, load_fraction=0.7)
+            region = dc_info.get("region", "default")
+            carbon = get_carbon_intensity(region)
+
+            dc_details[dc_name] = {
+                "distance": distance,
+                "latency": latency,
+                "carbon": carbon,
+                "weather": weather
+            }
+
+        progress_text.empty()
+        progress_bar.empty()
+
+                
+        # Display DC selection with all available options
+        selected_dc_names = selected_dcs
         
         if len(selected_dc_names) == 0:
             st.error("⚠️ Please select at least 1 datacenter!")
         elif len(selected_dc_names) > 3:
             st.warning("⚠️ Maximum 3 datacenters recommended for clear comparison")
         
+        alt_datacenters: dict[str, dict[str, Any]] = all_datacenters
+        alt_weather: dict[str, dict[str, Any]] = dc_weather_data
+
         # Display selected DC details with weather
         if selected_dc_names:
             dc_cols = st.columns(len(selected_dc_names))
             
             for i, dc_name in enumerate(selected_dc_names):
-                dc_info = all_datacenters[dc_name]
+                dc_info = alt_datacenters[dc_name]
+                alt_weather[dc_name] = cached_weather(dc_info['lat'], dc_info['lon'], dc_name, dc_info.get("climate", "moderate"))
                 details = dc_details[dc_name]
                 weather = details['weather']
                 
@@ -3072,6 +3916,8 @@ def main():
                         <p style="margin: 0.25rem 0;">🌡️ <strong>{weather['temperature']:.1f}°C</strong></p>
                         <p style="margin: 0.25rem 0;">💧 {weather['humidity']:.0f}% humidity</p>
                         <p style="margin: 0.25rem 0;">💨 {weather['wind_speed']:.1f} m/s wind</p>
+                        <p style="margin: 0.25rem 0;">🌡️ {weather.get('pressure', 1013.25):.0f} hPa</p>
+                        <p style="margin: 0.25rem 0;">☀️ {weather.get('solar_radiation', 0):.0f} W/m²</p>
                         <hr style="margin: 0.5rem 0; border-color: #eee;">
                         <p style="margin: 0.25rem 0;">📍 {details['distance']:,.0f} km</p>
                         <p style="margin: 0.25rem 0;">⏱️ {details['latency']:.0f} ms</p>
@@ -3081,7 +3927,7 @@ def main():
 
         # 1.3 Geographic Layout Preview
         st.markdown('<div class="subsection-header">1.3 Geographic Layout Preview</div>', unsafe_allow_html=True)
-        #st.plotly_chart(fig_map, use_container_width=True)
+        #st.plotly_chart(fig_map, config=PLOTLY_CONFIG, use_container_width=True)
 
         if selected_dc_names:
             # Build a small geographic map for the current experimental setup
@@ -3104,6 +3950,7 @@ def main():
                         color=[climate_colors.get(all_datacenters[name]['climate'], '#6b7280') for name in selected_dc_names]
                     ),
                     textposition="top center",
+                    textfont=dict(size=20, family='Times New Roman', color='#000000'),
                     name="Datacenters"
                 )
             )
@@ -3117,6 +3964,7 @@ def main():
                     mode="markers+text",
                     marker=dict(size=12, symbol="star"),
                     textposition="bottom center",
+                    textfont=dict(size=20, family='Times New Roman', color='#000000'),
                     name="User"
                 )
             )
@@ -3155,7 +4003,8 @@ def main():
 
             fig_setup_map.update_layout(
                 margin=dict(l=0, r=0, t=0, b=0),
-                height=350,
+                height=600,
+                font=dict(family='Times New Roman', size=20, color='#000000'),
                 legend=dict(
                     orientation="h",
                     yanchor="bottom",
@@ -3163,11 +4012,12 @@ def main():
                     xanchor="center",
                     x=0.5,
                     bgcolor="rgba(255,255,255,0.9)",
-                    borderwidth=1
+                    borderwidth=1,
+                    font=dict(size=20, family='Times New Roman', color='#000000')
                 )
             )
 
-            st.plotly_chart(fig_setup_map, use_container_width=True)
+            st.plotly_chart(fig_setup_map, config=PLOTLY_CONFIG_CLEAN, use_container_width=True)
         else:
             st.info("Select at least one datacenter to see the geographic preview.")
 
@@ -3267,12 +4117,24 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     if "simulation_run" not in st.session_state:
         st.session_state.simulation_run = False
 
-    run_button = st.button("▶️ RUN SIMULATION", type="primary", use_container_width=True)
+    # ---- simulation caching ----
+    if "sim_results" not in st.session_state:
+        st.session_state.sim_results = None
+    if "sim_key" not in st.session_state:
+        st.session_state.sim_key = None
+    if "force_sim_rerun" not in st.session_state:
+        st.session_state.force_sim_rerun = False
+    if "temp_sensitivity" not in st.session_state:
+        st.session_state.temp_sensitivity = None
+    if "scenario_results" not in st.session_state:
+        st.session_state.scenario_results = None
+
+    run_button = st.button("▶️ RUN SIMULATION", type="primary", use_container_width=True, key="run_sim_btn")
 
     # If the button is clicked on this run, mark simulation as started
     if run_button:
         st.session_state.simulation_run = True
-
+        st.session_state.force_sim_rerun = True  # force rerun on next section
     # If simulation has never been started, block the rest of the page
     if not st.session_state.simulation_run:
         st.info("👆 Configure your experiment above and click 'RUN SIMULATION' to begin!")
@@ -3293,7 +4155,10 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     weather_data = {k: dc_weather_data[k] for k in selected_dc_names}
     
     # Default cooling selections
-    cooling_selections = {k: all_datacenters[k]['default_cooling'] for k in selected_dc_names}
+    if 'cooling_selections' not in st.session_state or set(st.session_state.cooling_selections.keys()) != set(selected_dc_names):
+        st.session_state.cooling_selections = {k: all_datacenters[k]['default_cooling'] for k in selected_dc_names}
+    
+    cooling_selections = st.session_state.cooling_selections
     
     # Progress indicator
     progress_bar = st.progress(0, text="Initializing simulation...")
@@ -3317,6 +4182,8 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             'Temperature (°C)': f"{weather_data[dc_name]['temperature']:.1f}",
             'Humidity (%)': f"{weather_data[dc_name]['humidity']:.0f}",
             'Wind (m/s)': f"{weather_data[dc_name]['wind_speed']:.1f}",
+            'Pressure (hPa)': f"{weather_data[dc_name].get('pressure', 1013.25):.1f}",
+            'Solar (W/m²)': f"{weather_data[dc_name].get('solar_radiation', 0.0):.0f}",
             'Carbon (kg/kWh)': f"{dc_details[dc_name]['carbon']:.3f}",
             'Distance (km)': f"{dc_details[dc_name]['distance']:,.0f}",
             'Latency (ms)': f"{dc_details[dc_name]['latency']:.0f}"
@@ -3328,9 +4195,9 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     # 2.2 Geographic Map
     st.markdown('<div class="subsection-header">2.2 Geographic Visualization (Map #1)</div>', unsafe_allow_html=True)
     
-    fig_map1 = create_geographic_map(active_datacenters, user_location, 
-                                     title="🌍 User Location and Datacenter Positions")
-    st.plotly_chart(fig_map1, use_container_width=True)
+    fig_map1 = create_geographic_map(active_datacenters, user_location,
+                                     title="User Location and Datacenter Positions")
+    st.plotly_chart(fig_map1, config=PLOTLY_CONFIG, use_container_width=True)
     
     # 2.3 Initial Recommendation
     st.markdown('<div class="subsection-header">2.3 Initial Recommendation</div>', unsafe_allow_html=True)
@@ -3453,7 +4320,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             weather_data[dc_name]['humidity'],
             cooling_selections[dc_name]
         )
-        heat = energy_per_req * requests * COOLING_SYSTEMS[cooling_selections[dc_name]]['pue']
+        heat = float(energy_per_req) * float(requests)
         deterministic_results['Energy-Only']['datacenters'][dc_name] = {
             'requests': requests,
             'percentage': (requests / total_reqs) * 100,
@@ -3473,31 +4340,42 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             y=[pct],
             name=dc_name.split(',')[0],
             marker_color=color,
-            text=[f"{pct:.1f}%"],
-            textposition='auto'
+            text=[f"<b>{pct:.1f}%</b>"],
+            textposition='auto',
+            textfont=dict(size=28, color='#000000', family='Times New Roman')
         ))
-    
+
     fig_det_dist.update_layout(
-        title="Energy-Only Routing: Traffic Distribution",
-        yaxis_title="Traffic (%)",
-        height=350,
-        showlegend=False
+        title=dict(text="<b>Energy-Only Routing: Traffic Distribution</b>",
+                  font=dict(size=48, family='Times New Roman', color='#000000')),
+        yaxis_title=dict(text="<b>Traffic (%)</b>",
+                        font=dict(size=36, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Datacenter</b>",
+                        font=dict(size=36, family='Times New Roman', color='#000000')),
+        height=800,
+        margin=dict(l=100, r=60, t=120, b=100),
+        showlegend=False,
+        font=dict(family='Times New Roman', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        plot_bgcolor='white',
+        paper_bgcolor='white'
     )
     
-    st.plotly_chart(fig_det_dist, use_container_width=True)
+    st.plotly_chart(fig_det_dist, config=PLOTLY_CONFIG, use_container_width=True)
     
     # 3.4 Heat Concentration Map
     st.markdown('<div class="subsection-header">3.4 Heat Concentration Visualization (Map #2)</div>', unsafe_allow_html=True)
     
     fig_map2 = create_geographic_map(active_datacenters, user_location, energy_only_dist,
-                                     title="🔥 Heat Concentration with Energy-Only Routing")
-    st.plotly_chart(fig_map2, use_container_width=True)
+                                     title="Heat Concentration with Energy-Only Routing")
+    st.plotly_chart(fig_map2, config=PLOTLY_CONFIG, use_container_width=True)
     
     st.markdown("""
     <div class="physics-callout">
         <strong>💡 Key Physics Insight:</strong> "Cooling technology moves heat from datacenter interior 
         to exterior environment. The heat doesn't disappear — it dissipates locally. This creates 
-        Urban Heat Island effects proportional to the concentrated workload."
+        Delta-T Aware Routing effects proportional to the concentrated workload."
     </div>
     """, unsafe_allow_html=True)
     
@@ -3515,27 +4393,27 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     
     st.markdown("""
     **Features (X):**
-    - Temperature (°C): Range 0-45
-    - Humidity (%): Range 20-95
-    - Wind Speed (m/s): Range 0.5-15
-    - Cooling Type (encoded): 0-4
-    
+    - Temperature (°C): Range 0–45  *(Open-Meteo: temperature_2m)*
+    - Humidity (%): Range 20–95  *(Open-Meteo: relative_humidity_2m)*
+    - Wind Speed (m/s): Range 0.5–15  *(Open-Meteo: wind_speed_10m)*
+    - Surface Pressure (hPa): Typical 950–1050 *(Open-Meteo: surface_pressure)*
+    - Shortwave Radiation (W/m²): Typical 0–1000 *(Open-Meteo: shortwave_radiation)*
+    - Cooling Type (encoded): 0–4  *(air_economizer / chilled_water / direct_evap / liquid / immersion)*
+
+    **Why pressure + solar matter:**
+
+    Pressure is a proxy for synoptic conditions that correlate with air density / weather regime (helps generalization). Solar radiation captures external thermal loading that increases cooling demand and worsens local heat rejection.
+
     **Target (y):**
     - Energy per Request (Wh)
-    
-    **Dataset:** Historical weather data (2021-2024) from Open-Meteo for all datacenter locations,
-    with synthetic fallback (5000 training samples & 70/30 split) if historical data is unavailable.
-    
+
+    **Dataset:** Historical weather data (2021–2024) from Open-Meteo for all datacenter locations, with energy labels generated from the physics-based power model (and noise for realism).
+
     **Prediction:** Real-time current weather is used when making routing predictions.
     """)
     
-    # Train models
-    ai_models = AIModelSuite()
-
-    # This block is redundant with the one below - can be removed
-    # Keeping for now for backwards compatibility
-
-    
+    # Train models (ai_models already initialized above)
+     
     if "All" in model_choice:
         train_mode = 'all'
     elif "MLR" in model_choice:
@@ -3545,27 +4423,37 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     else:
         train_mode = 'bayesian' if BAYES_AVAILABLE else 'mlr'
     
-    model_results = ai_models.train_all(train_mode)
+    train_msg_ph = st.empty()
+    train_bar_ph = st.empty()
+    train_bar = train_bar_ph.progress(0)
 
-    if ai_models.training_source == "real":
-        st.success(
-            f"✅ Models trained on HISTORICAL Open-Meteo weather data (2021-2024) "
-            f"with {ai_models.training_samples:,} samples. "
-            f"Predictions use real-time current weather."
-        )
-    elif ai_models.training_source == "synthetic":
-        st.warning(
-            f"⚠️ Models trained on SYNTHETIC physics-based data "
-            f"({ai_models.training_samples:,} samples) "
-            f"because historical weather data was unavailable. "
-            f"Predictions use real-time current weather."
-        )
-    else:
-        st.info("ℹ️ Training data source: unknown.")
+    def _ui_progress(pct, msg):
+        try:
+            pct = max(0.0, min(1.0, float(pct)))
+        except Exception:
+            pct = 0.0
+        train_msg_ph.markdown(f"**{msg}**  \n{int(pct * 100)}%")
+        train_bar.progress(int(pct * 100))
+
+    model_results = ai_models.train_all(train_mode, progress_cb=_ui_progress)
+    _ui_progress(1.0, "Training complete")
 
     
-    # 4.2 Model Performance
-    # 4.2 Model Performance
+    joblib.dump(
+        {
+            "models": ai_models.models,  # sklearn models are serializable
+            "scalers": ai_models.scalers,
+            "metrics": ai_models.metrics,
+            "model_results": model_results,
+            "best_model_name": ai_models.best_model_name,
+            "feature_names": ai_models.feature_names,
+            "training_source": ai_models.training_source,
+            "training_samples": ai_models.training_samples,
+        },
+        MODEL_BUNDLE_PATH,
+    )
+    st.success(f"Saved trained models to: {MODEL_BUNDLE_PATH}")
+    
     st.markdown('<div class="subsection-header">4.2 Model Performance Comparison (Graph #3)</div>', unsafe_allow_html=True)
     
     # Display model cards with train/val/test metrics
@@ -3617,7 +4505,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown("### Train vs Validation vs Test Performance")
     fig_tvt = create_train_val_test_comparison(model_results)
     if fig_tvt:
-        st.plotly_chart(fig_tvt, use_container_width=True)
+        st.plotly_chart(fig_tvt, config=PLOTLY_CONFIG, use_container_width=True)
         
         st.markdown("""
         **Interpretation:**
@@ -3630,13 +4518,22 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown("### Neural Network Training Convergence")
     fig_lc = create_learning_curve_chart(model_results)
     if fig_lc:
-        st.plotly_chart(fig_lc, use_container_width=True)
-        st.markdown("**Finding:** Loss decreases smoothly, indicating stable convergence.")
+        st.plotly_chart(fig_lc, config=PLOTLY_CONFIG, use_container_width=True)
+        st_figure_downloads(fig_lc, "fig_ann_convergence")
+        st.markdown("**Finding:** Loss decreases with epoch (and validation R² stabilizes when early-stopping is enabled), indicating convergence.")
+
+    
+    st.markdown("### Bayesian Hyperparameter Optimization Convergence")
+    fig_bo = create_bayesopt_convergence_chart(model_results)
+    if fig_bo:
+        st.plotly_chart(fig_bo, config=PLOTLY_CONFIG, use_container_width=True)
+        st.markdown("**Finding:** Validation R² improves across BO iterations and stabilizes near the best configuration.")
+
     
     # Model comparison chart (keep existing)
     fig_model_comp = create_model_comparison_chart(model_results)
     if fig_model_comp:
-        st.plotly_chart(fig_model_comp, use_container_width=True)
+        st.plotly_chart(fig_model_comp, config=PLOTLY_CONFIG, use_container_width=True)
     
     st.markdown(f"""
     <div class="success-box">
@@ -3650,21 +4547,65 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     
     fig_scatter = create_prediction_scatter(model_results, best_model_name)
     if fig_scatter:
-        st.plotly_chart(fig_scatter, use_container_width=True)
+        st.plotly_chart(fig_scatter, config=PLOTLY_CONFIG, use_container_width=True)
     
     # 4.4 Feature Importance
     st.markdown('<div class="subsection-header">4.4 Feature Importance (Graph #5)</div>', unsafe_allow_html=True)
     
     if 'feature_importance' in model_results:
-        fig_importance = create_feature_importance_chart(model_results['feature_importance'])
+        fig_importance = create_feature_importance_chart(model_results['feature_importance'], best_model_name)
         if fig_importance:
-            st.plotly_chart(fig_importance, use_container_width=True)
+            st.plotly_chart(fig_importance, config=PLOTLY_CONFIG, use_container_width=True)
+
+        # Get top 2 features dynamically from the best model
+        model_importance = model_results['feature_importance'].get(best_model_name, {})
+        sorted_features = sorted(model_importance.items(), key=lambda x: abs(x[1]), reverse=True)
+        top_features = [f[0].replace('_', ' ').title() for f in sorted_features[:2]]
         
-        st.markdown("""
-        **Finding:** Temperature and cooling technology type are the dominant factors 
+        st.markdown(f"""
+        **Finding:** {top_features[0]} and {top_features[1]} are the dominant factors 
         influencing energy consumption per request.
         """)
-    
+        
+    SAVE_DIR = "saved_runs"
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
+    colA, colB = st.columns(2)
+
+    with colA:
+        if st.button("💾 Save trained models + results", key="save_bundle_btn"):
+            model_bundle = {
+                "models": ai_models.models,
+                "scalers": ai_models.scalers,
+                "metrics": ai_models.metrics,
+                "best_model_name": ai_models.best_model_name,
+                "feature_names": ai_models.feature_names,
+                "training_source": ai_models.training_source,
+                "training_samples": ai_models.training_samples,
+            }
+            joblib.dump(model_bundle, os.path.join(SAVE_DIR, "ai_models.joblib"))
+            joblib.dump(st.session_state.get("sim_results", None), os.path.join(SAVE_DIR, "sim_results.joblib"))
+            st.success("Saved to saved_runs/")
+
+    with colB:
+        if st.button("📂 Load trained models + results", key="load_bundle_btn"):
+            try:
+                bundle = joblib.load(os.path.join(SAVE_DIR, "ai_models.joblib"))
+                ai_models.models = bundle["models"]
+                ai_models.scalers = bundle["scalers"]
+                ai_models.metrics = bundle["metrics"]
+                ai_models.best_model_name = bundle["best_model_name"]
+                ai_models.feature_names = bundle["feature_names"]
+                ai_models.training_source = bundle.get("training_source", "unknown")
+                ai_models.training_samples = bundle.get("training_samples", 0)
+                ai_models.is_trained = True
+                # Restore best_model reference
+                if ai_models.best_model_name and ai_models.best_model_name in ai_models.models:
+                    ai_models.best_model = ai_models.models[ai_models.best_model_name]
+                st.session_state.sim_results = joblib.load(os.path.join(SAVE_DIR, "sim_results.joblib"))
+                st.success("Loaded from saved_runs/")
+            except FileNotFoundError:
+                st.error("No saved models found. Run and save first.")
     # ========================================================================
     # SECTION 5: ROUTING STRATEGY COMPARISON
     # ========================================================================
@@ -3681,20 +4622,52 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     | Strategy | Description | Formula |
     |----------|-------------|---------|
     | **1️⃣ Random** | Baseline uniform distribution | Random allocation of prompts for each DC |
-    | **2️⃣ Energy-Only** | Route to lowest energy DC | argmin(E) |
-    | **3️⃣ UHI-Aware** | Minimize urban heat island effect | Minimize peak UHII |
+    | **2️⃣ Energy-Only** | Route to lowest energy DC | Minimize energy consumption |
+    | **3️⃣ ΔT-AR** | Minimize delta-T aware routing effect | Minimize peak ΔT |
     | **4️⃣ Multi-Objective** | Balance all factors | Weighted combination |
     """)
     
     # Run initial simulation for all strategies
-    results = run_simulation(
-    active_datacenters, weather_data, user_location,
-    num_requests, cooling_selections, energy_multiplier, ai_models, latency_threshold
-    )
     
+
+    # Build a key from inputs that should trigger a re-run
+    # Note: best_model_name excluded - model choice shouldn't trigger sim rerun
+    sim_inputs = {
+        "selected_dc_names": selected_dc_names,
+        "num_requests": num_requests,
+        "cooling_selections": dict(st.session_state.cooling_selections),
+        "energy_multiplier": energy_multiplier,
+        "latency_threshold": latency_threshold,
+    }
+
+    sim_key = hashlib.md5(json.dumps(sim_inputs, sort_keys=True, default=str).encode()).hexdigest()
+
+    need_run = (
+        st.session_state.force_sim_rerun
+        or st.session_state.sim_results is None
+        or st.session_state.sim_key != sim_key
+    )
+
+    if need_run:
+        st.session_state.sim_key = sim_key
+        st.session_state.sim_results = run_simulation(
+            active_datacenters, weather_data, user_location,
+            num_requests, cooling_selections, energy_multiplier, ai_models, latency_threshold,
+            max_dc_capacity_mw
+        )
+        st.session_state.force_sim_rerun = False
+
+    results = st.session_state.sim_results
+    
+    # Guard against None results
+    if results is None:
+        st.warning("⚠️ Please click 'RUN SIMULATION' button above to see results.")
+        st.stop()
+
+    # 5.2 Strategy Summary    
     fig_traffic = create_traffic_distribution_chart(results, title="Traffic Distribution by Strategy")
     if fig_traffic:
-        st.plotly_chart(fig_traffic, use_container_width=True)
+        st.plotly_chart(fig_traffic, config=PLOTLY_CONFIG, use_container_width=True)
     
     # 5.4 Cooling Configuration
     st.markdown('<div class="subsection-header">5.3 Cooling Technology Configuration</div>', unsafe_allow_html=True)
@@ -3718,14 +4691,21 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             )
             new_cooling_selections[dc_name] = new_cooling
     
-    # Check if cooling changed
-    if new_cooling_selections != cooling_selections:
-        cooling_selections = new_cooling_selections
-        results = run_simulation(
-            active_datacenters, weather_data, user_location,
-            num_requests, cooling_selections, energy_multiplier, ai_models, latency_threshold
-        )
-        st.info("🔄 Simulation re-run with updated cooling configuration")
+    # Check if cooling changed (only on actual user interaction, not button reruns)
+    cooling_actually_changed = False
+    for dc_name in new_cooling_selections:
+        widget_key = f"cooling_select_{dc_name}"
+        if widget_key in st.session_state:
+            current_widget_value = st.session_state[widget_key]
+            stored_value = st.session_state.cooling_selections.get(dc_name)
+            if current_widget_value != stored_value:
+                cooling_actually_changed = True
+                st.session_state.cooling_selections[dc_name] = current_widget_value
+    
+    if cooling_actually_changed:
+        st.session_state.force_sim_rerun = True
+        st.info("🔄 Cooling updated — simulation will refresh.")
+        st.rerun()
     
     # ========================================================================
     # SECTION 6: COMPREHENSIVE RESULTS
@@ -3745,7 +4725,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             'Energy (Wh)': f"{results[strategy]['totals']['energy_wh']:.1f}",
             'Carbon (g)': f"{results[strategy]['totals']['carbon_g']:.1f}",
             'Latency (ms)': f"{results[strategy]['totals']['avg_latency_ms']:.1f}",
-            'Peak UHI (°C)': f"{results[strategy]['totals']['peak_uhi']:.4f}",
+            'Peak ΔT-AR (°C)': f"{results[strategy]['totals']['peak_ΔT']:.4f}",
             'Heat CV': f"{results[strategy]['totals']['heat_cv']:.3f}"
         }
         for strategy in results.keys()
@@ -3756,13 +4736,13 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown('<div class="subsection-header">6.2 Multi-Metric Comparison (Graph #7)</div>', unsafe_allow_html=True)
     
     fig_metrics = create_metrics_comparison_chart(results)
-    st.plotly_chart(fig_metrics, use_container_width=True)
+    st.plotly_chart(fig_metrics, config=PLOTLY_CONFIG, use_container_width=True)
     
     # 6.3 Heat Distribution
     st.markdown('<div class="subsection-header">6.3 Heat Distribution by Strategy (Graph #8)</div>', unsafe_allow_html=True)
     
     fig_heat = create_heat_distribution_chart(results)
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, config=PLOTLY_CONFIG, use_container_width=True)
     
     # 6.4 Final Map
     st.markdown('<div class="subsection-header">6.4 Geographic Distribution (Map #3)</div>', unsafe_allow_html=True)
@@ -3775,11 +4755,11 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     )
     
     fig_map3 = create_geographic_map(
-        active_datacenters, user_location, 
+        active_datacenters, user_location,
         results[map_strategy]['distribution'],
-        title=f"🗺️ Traffic Distribution: {map_strategy} Strategy"
+        title=f"Traffic Distribution: {map_strategy} Strategy"
     )
-    st.plotly_chart(fig_map3, use_container_width=True)
+    st.plotly_chart(fig_map3, config=PLOTLY_CONFIG, use_container_width=True)
     
   # 6.5 Final Recommendation
     st.markdown('<div class="subsection-header">6.5 Final Recommendation</div>', unsafe_allow_html=True)
@@ -3787,7 +4767,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     final_rec = generate_final_recommendation(results, latency_threshold)
 
     imp = final_rec["improvements"]
-    uhi_pct = imp["uhi_reduction_pct"]
+    ΔT_pct = imp["ΔT_reduction_pct"]
     cv_pct = imp["cv_reduction_pct"]
     latency_pct = imp["latency_change_pct"]   # negative = latency improves
     energy_pct = imp["energy_overhead_pct"]
@@ -3800,14 +4780,14 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     </h4>
 
     <p style="margin: 0.5rem 0;">
-        <strong>Based on the multi-metric evaluation (Energy, Latency, Carbon, and UHI),
-        the UHI-Aware strategy delivers the strongest overall sustainability
+        <strong>Based on the multi-metric evaluation (Energy, Latency, Carbon, and ΔT-AR),
+        the ΔT-AR strategy delivers the strongest overall sustainability
         performance compared to Energy-Only routing.</strong>
     </p>
 
     <p style="margin: 0.5rem 0;"><strong>Measured Effects (vs. Energy-Only):</strong></p>
     <ul style="margin: 0 0 1rem 0;">
-        <li>🌡️ <strong>{uhi_pct:.1f}% reduction in peak UHI</strong></li>
+        <li>🌡️ <strong>{ΔT_pct:.1f}% reduction in peak ΔT-AR</strong></li>
         <li>🔥 <strong>{cv_pct:.1f}% reduction in heat concentration (CV)</strong></li>
         <li>⏱️ {(-latency_pct):.1f}% lower latency</li>
         <li>⚡ ~{energy_pct:.1f}% energy overhead to achieve these gains</li>
@@ -3816,7 +4796,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     <p style="margin-top: 0.75rem; font-style: italic;">
         <strong>Interpretation:</strong> A modest energy overhead of about {energy_pct:.1f}% yields
         a disproportionately large sustainability benefit, reducing localized thermal
-        stress by ~{uhi_pct:.1f}% and smoothing heat distribution by ~{cv_pct:.1f}%, 
+        stress by ~{ΔT_pct:.1f}% and smoothing heat distribution by ~{cv_pct:.1f}%, 
         while slightly improving latency. This trade-off represents a more optimal and
         resilient routing policy than traditional Energy-Only optimization.
     </p>
@@ -3825,9 +4805,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         unsafe_allow_html=True,
     )
 
-
-
-    
+  
     # ========================================================================
     # SECTION 7: MONTE CARLO VALIDATION
     # ========================================================================
@@ -3847,6 +4825,8 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         | Temperature | Normal | μ = current, σ = 5°C |
         | Humidity | Normal | μ = current, σ = 15% |
         | Wind Speed | Normal | μ = current, σ = 2 m/s |
+        | Pressure | Normal | μ = current, σ = 10 hPa |
+        | Solar Radiation | Normal | μ = current, σ = 100 W/m² |   
         | Request Volume | Uniform | ±20% of base |
         """)
         
@@ -3864,7 +4844,33 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         st.markdown('<div class="subsection-header">7.2 Distribution Analysis (Graphs #9-12)</div>', unsafe_allow_html=True)
         
         fig_mc_box = create_monte_carlo_boxplots(mc_results)
-        st.plotly_chart(fig_mc_box, use_container_width=True)
+        st.plotly_chart(fig_mc_box, config=PLOTLY_CONFIG, use_container_width=True)
+
+        st_figure_downloads(fig_mc_box, "fig_mc_boxplots")
+
+        st.markdown("#### 7.2.1 Mean ± 95% CI of the mean")
+        fig_mc_ci = create_monte_carlo_mean_ci_chart(mc_results)
+        st.plotly_chart(fig_mc_ci, config=PLOTLY_CONFIG, use_container_width=True)
+        st_figure_downloads(fig_mc_ci, "fig_mc_mean_ci")
+
+        st.markdown("#### 7.2.2 Distribution overlay (Peak ΔT-AR)")
+        fig_mc_hist = create_monte_carlo_hist_overlay(
+            mc_results, metric="peak_ΔT",
+            title="Monte Carlo Distribution Overlay: Peak ΔT-AR (°C)",
+            x_label="Peak ΔT-AR (°C)"
+        )
+        st.plotly_chart(fig_mc_hist, config=PLOTLY_CONFIG, use_container_width=True)
+        st_figure_downloads(fig_mc_hist, "fig_mc_peak_ΔT_overlay")
+
+        st.markdown("#### 7.2.3 Monte Carlo convergence (running mean of Peak ΔT-AR)")
+        fig_mc_conv = create_monte_carlo_running_mean_chart(
+            mc_results, metric="peak_ΔT",
+            title="Monte Carlo Convergence: Running Mean of Peak ΔT-AR (°C)",
+            y_label="Running mean Peak ΔT-AR (°C)"
+        )
+        st.plotly_chart(fig_mc_conv, config=PLOTLY_CONFIG, use_container_width=True)
+        st_figure_downloads(fig_mc_conv, "fig_mc_peak_ΔT_convergence")
+
         
         # 7.4 Statistical Significance
         st.markdown('<div class="subsection-header">7.3 Statistical Significance Testing</div>', unsafe_allow_html=True)
@@ -3873,7 +4879,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         
         if stat_results:
             st.markdown(f"""
-            **Welch's t-test: Energy-Only vs Multi-Objective (Peak UHI)**
+            **Welch's t-test: Energy-Only vs Multi-Objective (Peak ΔT-AR)**
             
             | Metric | Value |
             |--------|-------|
@@ -3889,7 +4895,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
                 st.markdown(f"""
                 <div class="success-box">
                     <strong>✅ {stat_results['significance']}</strong><br>
-                    The difference in Peak UHI between Energy-Only and Multi-Objective routing 
+                    The difference in Peak ΔT-AR between Energy-Only and Multi-Objective routing 
                     is statistically significant. We can confidently reject the null hypothesis 
                     that they perform equally.
                 </div>
@@ -3904,40 +4910,55 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     progress_bar.progress(85, text="Running sensitivity analysis...")
     
     st.markdown('<div class="section-header">📈 SECTION 8: Sensitivity Analysis</div>', unsafe_allow_html=True)
-    st.markdown("*How do results change when key parameters vary?*")
+    st.markdown("*How do results change when key parameters varyΔ*")
     
     # 8.1 Temperature Sensitivity
-    st.markdown('<div class="subsection-header">8.1 Temperature Sensitivity (Graph #13)</div>', unsafe_allow_html=True)
+    st.markdown("Run temperature sensitivity to see how strategies perform across different temperatures.")
     
-    # Run sensitivity analysis
-    temp_range = list(range(15, 45, 5))
-    temp_sensitivity = {'x': temp_range, 'y': {s: [] for s in results.keys()}}
+    run_temp = st.button("🌡️ Run Temperature Sensitivity Analysis", key="run_temp_sens_btn")
     
-    for temp_offset in temp_range:
-        # Create modified weather
-        modified_weather = {}
-        for dc_name, weather in weather_data.items():
-            modified_weather[dc_name] = {
-                'temperature': temp_offset,
-                'humidity': weather['humidity'],
-                'wind_speed': weather['wind_speed']
-            }
+    if run_temp:
+        with st.spinner("Running temperature sensitivity analysis..."):
+            temp_range = list(range(15, 45, 5))
+            temp_sensitivity = {'x': temp_range, 'y': {s: [] for s in results.keys()}}
+            
+            progress = st.progress(0)
+            for idx, temp_offset in enumerate(temp_range):
+                progress.progress((idx + 1) / len(temp_range))
+                
+                # Create modified weather
+                modified_weather = {}
+                for dc_name, weather in weather_data.items():
+                    modified_weather[dc_name] = {
+                        'temperature': temp_offset,
+                        'humidity': weather['humidity'],
+                        'wind_speed': weather['wind_speed']
+                    }
+                
+                temp_results = run_simulation(
+                    active_datacenters, modified_weather, user_location,
+                    num_requests, cooling_selections, energy_multiplier, ai_models
+                )
+                
+                for strategy in results.keys():
+                    temp_sensitivity['y'][strategy].append(temp_results[strategy]['totals']['peak_ΔT'])
+            
+            progress.empty()
+            st.session_state.temp_sensitivity = temp_sensitivity
+            st.success("✅ Temperature sensitivity analysis complete!")
+    
+    # Display results if they exist
+    if st.session_state.temp_sensitivity is not None:
+        fig_temp_sens = create_sensitivity_temperature_chart(st.session_state.temp_sensitivity)
+        st.plotly_chart(fig_temp_sens, config=PLOTLY_CONFIG, use_container_width=True)
         
-        temp_results = run_simulation(
-            active_datacenters, modified_weather, user_location,
-            num_requests, cooling_selections, energy_multiplier, ai_models
-        )
-        
-        for strategy in results.keys():
-            temp_sensitivity['y'][strategy].append(temp_results[strategy]['totals']['peak_uhi'])
-    
-    fig_temp_sens = create_sensitivity_temperature_chart(temp_sensitivity)
-    st.plotly_chart(fig_temp_sens, use_container_width=True)
-    
-    st.markdown("""
-    **Finding:** Energy-Only strategy becomes increasingly worse as ambient temperatures rise, 
-    while Multi-Objective routing remains more stable across temperature variations.
-    """)
+        st.markdown("""
+        **Finding:** Energy-Only strategy becomes increasingly worse as ambient temperatures rise, 
+        while Multi-Objective routing remains more stable across temperature variations.
+        """)
+    else:
+        st.info("👆 Click the button above to run temperature sensitivity analysis")
+
     
     # 8.2 Latency Threshold Sensitivity
     st.markdown('<div class="subsection-header">8.2 Latency Threshold Impact (Graph #14)</div>', unsafe_allow_html=True)
@@ -3979,9 +5000,9 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     
     if alt_dcs and len(alt_dcs) >= 1:
         # Build alternative datacenter dict
-        alt_datacenters = {}
-        alt_weather = {}
-        alt_cooling = {}
+        alt_datacenters: dict[str, dict[str, Any]] = {}
+        alt_weather: dict[str, dict[str, Any]] = {}
+        alt_cooling: dict[str, str] = {}
         
         for dc_name in alt_dcs:
             if dc_name in DEFAULT_DATACENTERS:
@@ -3989,6 +5010,13 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             else:
                 loc = EXTENDED_DC_LOCATIONS[dc_name]
                 weather = fetch_weather_data(loc['lat'], loc['lon'], dc_name)
+                temp = weather.get("temperature")
+                hum  = weather.get("humidity")
+                wind = weather.get("wind_speed")
+
+                if temp is None or hum is None or wind is None:
+                    st.warning(f"Weather missing for {dc_name}. Using defaults.")
+                    temp, hum, wind = 25.0, 60.0, 3.0
                 climate_info = classify_climate(weather['temperature'], weather['humidity'])
                 
                 alt_datacenters[dc_name] = {
@@ -4000,58 +5028,69 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
                     'emoji': climate_info['emoji']
                 }
             
-            # Fetch weather
             dc_info = alt_datacenters[dc_name]
             alt_weather[dc_name] = fetch_weather_data(dc_info['lat'], dc_info['lon'], dc_name)
             alt_cooling[dc_name] = dc_info.get('default_cooling', 'air_economizer')
         
-        if st.button("🔄 Run Scenario Comparison"):
-            # Run simulation for alternative scenario
-            alt_results = run_simulation(
-                alt_datacenters, alt_weather, user_location,
-                num_requests, alt_cooling, energy_multiplier, ai_models
-            )
+        run_scenario_btn = st.button("🔄 Run Scenario Comparison", key="run_scenario_btn")
+        
+        if run_scenario_btn:
+            with st.spinner("Running scenario comparison..."):
+                # Run simulation for alternative scenario
+                alt_results = run_simulation(
+                    alt_datacenters, alt_weather, user_location,
+                    num_requests, alt_cooling, energy_multiplier, ai_models
+                )
+                st.session_state.scenario_results = {
+                    'alt_results': alt_results,
+                    'alt_datacenters': alt_datacenters
+                }
+                st.success("✅ Scenario comparison complete!")
+        
+           # Display results if they exist
+        if st.session_state.scenario_results is not None and results is not None:
+            alt_results = st.session_state.scenario_results['alt_results']
             
             st.markdown('<div class="subsection-header">9.2 Scenario Comparison (Graph #16)</div>', unsafe_allow_html=True)
             
             # Compare Multi-Objective results
             current_mo = results['Multi-Objective']
             alt_mo = alt_results['Multi-Objective']
-            
+         
             comparison_df = pd.DataFrame([
                 {
                     'Metric': 'Energy (Wh)',
                     'Current': f"{current_mo['totals']['energy_wh']:.1f}",
                     'Alternative': f"{alt_mo['totals']['energy_wh']:.1f}",
-                    'Change': f"{((alt_mo['totals']['energy_wh'] - current_mo['totals']['energy_wh']) / current_mo['totals']['energy_wh'] * 100):.1f}%"
+                    'Change': f"{((alt_mo['totals']['energy_wh']/current_mo['totals']['energy_wh'])-1)*100:+.1f}%"
+                },
+                {
+                    'Metric': 'Peak ΔT-AR (°C)',
+                    'Current': f"{current_mo['totals']['peak_ΔT']:.2f}",
+                    'Alternative': f"{alt_mo['totals']['peak_ΔT']:.2f}",
+                    'Change': f"{((alt_mo['totals']['peak_ΔT']/current_mo['totals']['peak_ΔT'])-1)*100:+.1f}%"
                 },
                 {
                     'Metric': 'Carbon (g)',
                     'Current': f"{current_mo['totals']['carbon_g']:.1f}",
                     'Alternative': f"{alt_mo['totals']['carbon_g']:.1f}",
-                    'Change': f"{((alt_mo['totals']['carbon_g'] - current_mo['totals']['carbon_g']) / current_mo['totals']['carbon_g'] * 100):.1f}%"
-                },
-                {
-                    'Metric': 'Latency (ms)',
-                    'Current': f"{current_mo['totals']['avg_latency_ms']:.1f}",
-                    'Alternative': f"{alt_mo['totals']['avg_latency_ms']:.1f}",
-                    'Change': f"{((alt_mo['totals']['avg_latency_ms'] - current_mo['totals']['avg_latency_ms']) / current_mo['totals']['avg_latency_ms'] * 100):.1f}%"
-                },
-                {
-                    'Metric': 'Peak UHI (°C)',
-                    'Current': f"{current_mo['totals']['peak_uhi']:.4f}",
-                    'Alternative': f"{alt_mo['totals']['peak_uhi']:.4f}",
-                    'Change': f"{((alt_mo['totals']['peak_uhi'] - current_mo['totals']['peak_uhi']) / current_mo['totals']['peak_uhi'] * 100):.1f}%"
+                    'Change': f"{((alt_mo['totals']['carbon_g']/current_mo['totals']['carbon_g'])-1)*100:+.1f}%"
                 }
             ])
             
             st.dataframe(comparison_df, use_container_width=True, hide_index=True)
             
+               # Visualization
             fig_scenario = create_scenario_comparison_chart(
-                current_mo, alt_mo,
-                "Current Config", "Alternative Config"
+                results['Multi-Objective'],
+                alt_results['Multi-Objective'],
+                "Current Configuration",
+                "Alternative Configuration"
             )
-            st.plotly_chart(fig_scenario, use_container_width=True)
+            if fig_scenario:
+                st.plotly_chart(fig_scenario, config=PLOTLY_CONFIG, use_container_width=True)
+        else:
+            st.info("👆 Click the button above to run scenario comparison")
     
     # ========================================================================
     # SECTION 10: CARBON INTENSITY ANALYSIS
@@ -4064,7 +5103,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown('<div class="subsection-header">10.1 24-Hour Carbon Curves (Graph #17)</div>', unsafe_allow_html=True)
     
     fig_carbon = create_carbon_intensity_curves()
-    st.plotly_chart(fig_carbon, use_container_width=True)
+    st.plotly_chart(fig_carbon, config=PLOTLY_CONFIG, use_container_width=True)
     
     # 10.2 Data Sources
     st.markdown('<div class="subsection-header">10.2 Data Sources</div>', unsafe_allow_html=True)
@@ -4090,7 +5129,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown('<div class="subsection-header">11.1 Cooling Effectiveness Matrix (Graph #18)</div>', unsafe_allow_html=True)
     
     fig_cooling_matrix = create_cooling_effectiveness_heatmap()
-    st.plotly_chart(fig_cooling_matrix, use_container_width=True)
+    st.plotly_chart(fig_cooling_matrix, config=PLOTLY_CONFIG, use_container_width=True)
     
     st.markdown("""
     **Legend:** ✓ = Optimal | ○ = Acceptable | ✗ = Not Recommended
@@ -4102,7 +5141,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown('<div class="subsection-header">11.2 PUE Comparison (Graph #19)</div>', unsafe_allow_html=True)
     
     fig_pue = create_pue_comparison_chart()
-    st.plotly_chart(fig_pue, use_container_width=True)
+    st.plotly_chart(fig_pue, config=PLOTLY_CONFIG, use_container_width=True)
     
     st.markdown("""
     **Interpretation:** 
@@ -4137,10 +5176,10 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     </div>
     
     <div class="reference-box">
-        <strong>Urban Heat Island Calculation:</strong><br>
+        <strong>Delta-T Aware Routing Calculation:</strong><br>
         Physics-based heat flux model derived from urban energy balance principles.<br>
         Formula: ΔT = α × (Q/A) × (1/(1 + β × wind))<br>
-        <small>Framework: Oke (1982), Sailor (2011). Validation: Yang et al. (2024) reports global UHII ~1.0°C</small>
+        <small>Framework: Oke (1982), Sailor (2011). Validation: Yang et al. (2024) reports global ?T ~1.0°C</small>
     </div>
     
     <div class="reference-box">
@@ -4185,8 +5224,8 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     energy_only_metrics = results['Energy-Only']['totals']
     multi_obj_metrics = results['Multi-Objective']['totals']
     
-    uhi_reduction = ((energy_only_metrics['peak_uhi'] - multi_obj_metrics['peak_uhi']) / 
-                     energy_only_metrics['peak_uhi'] * 100) if energy_only_metrics['peak_uhi'] > 0 else 0
+    ΔT_reduction = ((energy_only_metrics['peak_ΔT'] - multi_obj_metrics['peak_ΔT']) / 
+                     energy_only_metrics['peak_ΔT'] * 100) if energy_only_metrics['peak_ΔT'] > 0 else 0
     cv_reduction = ((energy_only_metrics['heat_cv'] - multi_obj_metrics['heat_cv']) / 
                     energy_only_metrics['heat_cv'] * 100) if energy_only_metrics['heat_cv'] > 0 else 0
     energy_overhead = ((multi_obj_metrics['energy_wh'] - energy_only_metrics['energy_wh']) / 
@@ -4197,13 +5236,17 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     max_dc_eo = max(eo_dist, key=eo_dist.get)
     max_pct_eo = (eo_dist[max_dc_eo] / sum(eo_dist.values())) * 100
     
+    # Calculate model variance from R² scores
+    model_r2_values = [r['r2'] for r in model_results.values() if isinstance(r, dict) and 'r2' in r and r['r2'] > 0]
+    model_variance_pct = (max(model_r2_values) - min(model_r2_values)) * 100 if len(model_r2_values) > 1 else 0.0
+    
     st.markdown(f"""
     <div class="finding-card">
-        <h4>Finding 1: UHI aware AI Prompt Routing</h4>
+        <h4>Finding 1: ΔT-AR aware AI Prompt Routing</h4>
         <p>Energy-only routing concentrated <strong>{max_pct_eo:.1f}%</strong> of traffic at 
         <strong>{max_dc_eo.split(',')[0]}</strong>, creating:</p>
         <ul>
-            <li>Peak UHI contribution: <strong>+{energy_only_metrics['peak_uhi']:.4f}°C</strong></li>
+            <li>Peak ΔT-AR contribution: <strong>+{energy_only_metrics['peak_ΔT']:.4f}°C</strong></li>
             <li>Heat concentration (CV): <strong>{energy_only_metrics['heat_cv']:.3f}</strong></li>
         </ul>
         <p><em>This defeats sustainability goals by creating localized thermal hotspots.</em></p>
@@ -4211,9 +5254,9 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     
     <div class="finding-card">
         <h4>Finding 2: Multi-Objective Routing Solution</h4>
-        <p>Balancing energy, latency, carbon, and UHI achieved:</p>
+        <p>Balancing energy, latency, carbon, and ΔT-AR achieved:</p>
         <ul>
-            <li>✅ <strong>{uhi_reduction:.1f}%</strong> reduction in Peak UHI</li>
+            <li>✅ <strong>{ΔT_reduction:.1f}%</strong> reduction in Peak ΔT-AR</li>
             <li>✅ <strong>{cv_reduction:.1f}%</strong> reduction in Heat Concentration</li>
             <li>⚠️ Only <strong>{energy_overhead:.1f}%</strong> energy overhead</li>
         </ul>
@@ -4224,10 +5267,10 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         <h4>Finding 3: Routing Strategy > AI Algorithm</h4>
         <p>Impact comparison:</p>
         <ul>
-            <li>AI model choice (MLR vs ANN vs Bayesian): ~5% variance in predictions</li>
-            <li>Routing strategy choice: ~{uhi_reduction:.0f}% variance in UHI metrics</li>
+            <li>AI model choice (MLR vs ANN vs Bayesian): ~{model_variance_pct:.1f}% variance in predictions</li>
+            <li>Routing strategy choice: ~{ΔT_reduction:.0f}% variance in ΔT-AR metrics</li>
         </ul>
-        <p><strong>Conclusion:</strong> Routing strategy selection has significantly larger impact 
+        <p><strong>Conclusion:</strong> Routing strategy selection has significantly larger impact
         on sustainability outcomes than AI algorithm choice.</p>
     </div>
     
@@ -4249,7 +5292,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             st.download_button(
                 label="📄 Download PDF Report",
                 data=pdf_data,
-                file_name=f"UHI_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                file_name=f"ΔT-AR_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                 mime="application/pdf",
                 help="Download a complete PDF report with metrics and recommendations"
             )
@@ -4278,14 +5321,14 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         st.download_button(
             label="📊 Download Results CSV",
             data=csv,
-            file_name="uhi_simulation_results.csv",
+            file_name="ΔT_simulation_results.csv",
             mime="text/csv"
         )
     
     with col2:
         # Create summary text
         summary_text = f"""
-UHI-Aware AI Routing for Sustainable Datacenters
+ΔT-AR AI Routing for Sustainable Datacenters
 Executive Summary
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
@@ -4297,7 +5340,7 @@ CONFIGURATION:
 
 KEY FINDINGS:
 1. DC Concentration Problem: Energy-only routing sent {max_pct_eo:.1f}% to {max_dc_eo}
-2. UHI Reduction: {uhi_reduction:.1f}% with Multi-Objective routing
+2. ΔT-AR Reduction: {ΔT_reduction:.1f}% with Multi-Objective routing
 3. Heat CV Reduction: {cv_reduction:.1f}%
 4. Energy Overhead: {energy_overhead:.1f}%
 
@@ -4310,7 +5353,7 @@ METRICS SUMMARY:
         st.download_button(
             label="📋 Download Summary Report",
             data=summary_text,
-            file_name="uhi_executive_summary.txt",
+            file_name="ΔT_executive_summary.txt",
             mime="text/plain"
         )
     
