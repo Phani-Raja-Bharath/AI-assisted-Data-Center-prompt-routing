@@ -1651,7 +1651,7 @@ def route_random(datacenters, num_requests):
 def route_energy_only(datacenters, weather_data, cooling_selections,
                       num_requests, ai_models=None, max_dc_capacity_mw=100):
     """
-    Energy-only routing - demonstrates Stockholm Concentration Problem.
+    Energy-only routing - demonstrates cooler location concentration problem.
     Routes more traffic to datacenters with lowest energy cost.
     Ignores latency SLO and ΔT-AR – intentionally unconstrained.
     """
@@ -3641,7 +3641,7 @@ def main():
             🌡️ AI-Assisted Datacenter Prompt Routing for ΔT-AR Mitigation
         </h1>
         <p style="font-family: 'Source Sans 3', sans-serif; color: #4a5568; font-size: 1.1rem; margin-bottom: 0.25rem;">
-            Demonstrating the usage of AI to mitigate the ΔT-AR (Delta-T Aware Routing) effect caused by datacenters
+            Demonstrating the usage of AI to mitigate localized heat concentration effect caused by datacenters
         </p>
         <p style="font-family: 'Source Sans 3', sans-serif; color: #718096; font-size: 0.9rem;">
             Phani Raja Bharath Balijepalli | University of Central Florida
@@ -3660,34 +3660,34 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Key Formulas
-    st.markdown("""
-    <div class="info-box" style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-left: 4px solid #2563eb;">
-        <strong>📐 Key Formulas Used:</strong>
-        <table style="width: 100%; margin-top: 0.5rem; font-size: 0.9rem;">
-            <tr>
-                <td><strong>Latency:</strong></td>
-                <td><code>L = L_prop + L_queue + L_proc</code></td>
-                <td style="color: #666;">where L_prop = 2d/c (round-trip), L_queue = M/M/1 model, L_proc = 30ms</td>
-            </tr>
-            <tr>
-                <td><strong>Energy:</strong></td>
-                <td><code>E = E_base × PUE × T_factor × H_factor</code></td>
-                <td style="color: #666;">E_base = 0.3 Wh (Stern, 2025)</td>
-            </tr>
-            <tr>
-                <td><strong>ΔT-AR:</strong></td>
-                <td><code>ΔT = α × (Q/A) × 1/(1 + β × wind)</code></td>
-                <td style="color: #666;">Physics-based model</td>
-            </tr>
-            <tr>
-                <td><strong>Carbon:</strong></td>
-                <td><code>C = E × I</code></td>
-                <td style="color: #666;">Luccioni & Hernandez-Garcia (2023)</td>
-            </tr>
-        </table>
-    </div>
-    """, unsafe_allow_html=True)
+    # # Key Formulas
+    # st.markdown("""
+    # <div class="info-box" style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-left: 4px solid #2563eb;">
+    #     <strong>📐 Key Formulas Used:</strong>
+    #     <table style="width: 100%; margin-top: 0.5rem; font-size: 0.9rem;">
+    #         <tr>
+    #             <td><strong>Latency:</strong></td>
+    #             <td><code>L = L_prop + L_queue + L_proc</code></td>
+    #             <td style="color: #666;">where L_prop = 2d/c (round-trip), L_queue = M/M/1 model, L_proc = 30ms</td>
+    #         </tr>
+    #         <tr>
+    #             <td><strong>Energy:</strong></td>
+    #             <td><code>E = E_base × PUE × T_factor × H_factor</code></td>
+    #             <td style="color: #666;">E_base = 0.3 Wh (Stern, 2025)</td>
+    #         </tr>
+    #         <tr>
+    #             <td><strong>ΔT-AR:</strong></td>
+    #             <td><code>ΔT = α × (Q/A) × 1/(1 + β × wind)</code></td>
+    #             <td style="color: #666;">Physics-based model</td>
+    #         </tr>
+    #         <tr>
+    #             <td><strong>Carbon:</strong></td>
+    #             <td><code>C = E × I</code></td>
+    #             <td style="color: #666;">Luccioni & Hernandez-Garcia (2023)</td>
+    #         </tr>
+    #     </table>
+    # </div>
+    # """, unsafe_allow_html=True)
     
     # ========================================================================
     # SECTION 1: EXPERIMENTAL SETUP
@@ -4249,16 +4249,16 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     """, unsafe_allow_html=True)
     
     # 3.2 Energy Calculation
-    st.markdown('<div class="subsection-header">3.2 Energy Calculation</div>', unsafe_allow_html=True)
+    # st.markdown('<div class="subsection-header">3.2 Energy Calculation</div>', unsafe_allow_html=True)
     
-    st.latex(r"E = E_{base} \times PUE \times (1 + \alpha \times \max(0, T - 20))")
+    # st.latex(r"E = E_{base} \times PUE \times (1 + \alpha \times \max(0, T - 20))")
     
-    st.markdown(f"""
-    **Parameters:**
-    - E_base = {BASE_ENERGY_WH} Wh (Stern, 2025 - WSJ datacenter measurement)
-    - α = 0.015 (temperature sensitivity coefficient)
-    - PUE = Power Usage Effectiveness from cooling technology
-    """)
+    # st.markdown(f"""
+    # **Parameters:**
+    # - E_base = {BASE_ENERGY_WH} Wh (Stern, 2025 - WSJ datacenter measurement)
+    # - α = 0.015 (temperature sensitivity coefficient)
+    # - PUE = Power Usage Effectiveness from cooling technology
+    # """)
     
     # Calculate energy for each DC
     energy_calc_df = pd.DataFrame([
