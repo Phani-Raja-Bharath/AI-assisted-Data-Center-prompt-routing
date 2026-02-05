@@ -937,15 +937,15 @@ def get_carbon_intensity(region, hour=None):
 
 
 def calculate_energy_per_request(temperature, humidity, cooling_type, energy_multiplier=1.0):
-    """
-    Calculate energy consumption per AI request.
+    # """
+    # Calculate energy consumption per AI request.
     
-    Formula: E = E_base × PUE × (1 + α × max(0, T - 20)) × humidity_factor
+    # Formula: E = E_base × PUE × (1 + α × max(0, T - 20)) × humidity_factor
     
-    Based on:
-    - Stern (2025): Base energy ~0.3 Wh per prompt
-    - Alkrush et al. (2024): PUE values by cooling type
-    """
+    # Based on:
+    # - Stern (2025): Base energy ~0.3 Wh per prompt
+    # - Alkrush et al. (2024): PUE values by cooling type
+    # """
     cooling = COOLING_SYSTEMS.get(cooling_type, COOLING_SYSTEMS['mechanical_chiller'])
     pue = cooling['pue']
     temp_sensitivity = cooling['temp_sensitivity']
@@ -966,19 +966,19 @@ def calculate_energy_per_request(temperature, humidity, cooling_type, energy_mul
 
 
 def calculate_ΔT_contribution(heat_kwh, area_km2=1.0, wind_speed=5.0):
-    """
-    Estimate local ΔT-AR contribution using physics-based heat flux model.
+    # """
+    # Estimate local ΔT-AR contribution using physics-based heat flux model.
     
-    Formula: ΔT = κ × (Q/A) × (1/(1 + γ × wind))
+    # Formula: ΔT = κ × (Q/A) × (1/(1 + γ × wind))
     
-    This model is derived from thermodynamic principles:
-    - Heat flux density (Q/A) drives local temperature rise
-    - Wind provides convective heat dissipation
+    # This model is derived from thermodynamic principles:
+    # - Heat flux density (Q/A) drives local temperature rise
+    # - Wind provides convective heat dissipation
     
-    Parameters:
-    - η = 0.0012: Heat-to-temperature coefficient (°C per kW/km²)
-    - γ = 0.15: Wind dissipation factor
-    """
+    # Parameters:
+    # - η = 0.0012: Heat-to-temperature coefficient (°C per kW/km²)
+    # - γ = 0.15: Wind dissipation factor
+    # """
     eta = 0.0012  # Heat-to-temperature coefficient
     gamma = 0.15     # Wind dissipation factor
     
