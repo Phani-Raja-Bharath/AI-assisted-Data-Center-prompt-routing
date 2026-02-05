@@ -541,7 +541,7 @@ def create_pdf_report(results, final_rec):
     summary_text = (
         f"Recommended Strategy: {final_rec['recommended_strategy']}\n\n"
         f"Reasoning:\n" + 
-        "\n".join([f"- {r.replace('✅', '[OK]').replace('⚠️', '[WARN]').replace('❌', '[X]').replace('🌡️', '').replace('🔥', '').replace('⏱️', '').replace('⚡', '')}" for r in final_rec['reasoning']])
+        "\n".join([f"- {r.replace('✅', '[OK]').replace('⚠️', '[WARN]').replace('❌', '[X]').replace('🌡️', '').replace('🔥', '').replace('⏱️', '').replace('⚡', '').replace('Δ', 'Delta')}" for r in final_rec['reasoning']])
     )
     pdf.multi_cell(0, 7, pdf_safe_text(summary_text))
     pdf.ln(10)
@@ -557,7 +557,7 @@ def create_pdf_report(results, final_rec):
     pdf.cell(35, 10, "Energy (Wh)", 1, 0, 'C', True)
     pdf.cell(35, 10, "Carbon (g)", 1, 0, 'C', True)
     pdf.cell(35, 10, "Latency (ms)", 1, 0, 'C', True)
-    pdf.cell(35, 10, "Peak ΔT-AR (C)", 1, 1, 'C', True)
+    pdf.cell(35, 10, "Peak Delta-T AR (C)", 1, 1, 'C', True)
     
     # Table Rows
     for strategy, data in results.items():
@@ -3644,8 +3644,7 @@ def main():
             Demonstrating the usage of AI to mitigate the ΔT-AR (Delta-T Aware Routing) effect caused by datacenters
         </p>
         <p style="font-family: 'Source Sans 3', sans-serif; color: #718096; font-size: 0.9rem;">
-            Phani Raja Bharath Balijepalli | IDS6938 - AI, Energy, and Sustainability | 
-            Fall 2025 | University of Central Florida
+            Phani Raja Bharath Balijepalli | University of Central Florida
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -3927,7 +3926,7 @@ def main():
 
         # 1.3 Geographic Layout Preview
         st.markdown('<div class="subsection-header">1.3 Geographic Layout Preview</div>', unsafe_allow_html=True)
-        #st.plotly_chart(fig_map, config=PLOTLY_CONFIG, use_container_width=True)
+        #st.plotly_chart(fig_map, config=PLOTLY_CONFIG, width='stretch')
 
         if selected_dc_names:
             # Build a small geographic map for the current experimental setup
@@ -4017,7 +4016,7 @@ def main():
                 )
             )
 
-            st.plotly_chart(fig_setup_map, config=PLOTLY_CONFIG_CLEAN, use_container_width=True)
+            st.plotly_chart(fig_setup_map, config=PLOTLY_CONFIG_CLEAN, width='stretch')
         else:
             st.info("Select at least one datacenter to see the geographic preview.")
 
@@ -4129,7 +4128,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     if "scenario_results" not in st.session_state:
         st.session_state.scenario_results = None
 
-    run_button = st.button("▶️ RUN SIMULATION", type="primary", use_container_width=True, key="run_sim_btn")
+    run_button = st.button("▶️ RUN SIMULATION", type="primary", width='stretch', key="run_sim_btn")
 
     # If the button is clicked on this run, mark simulation as started
     if run_button:
@@ -4190,14 +4189,14 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         }
         for dc_name in selected_dc_names
     ])
-    st.dataframe(weather_df, use_container_width=True, hide_index=True)
+    st.dataframe(weather_df, width='stretch', hide_index=True)
     
     # 2.2 Geographic Map
     st.markdown('<div class="subsection-header">2.2 Geographic Visualization (Map #1)</div>', unsafe_allow_html=True)
     
     fig_map1 = create_geographic_map(active_datacenters, user_location,
                                      title="User Location and Datacenter Positions")
-    st.plotly_chart(fig_map1, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_map1, config=PLOTLY_CONFIG, width='stretch')
     
     # 2.3 Initial Recommendation
     st.markdown('<div class="subsection-header">2.3 Initial Recommendation</div>', unsafe_allow_html=True)
@@ -4240,7 +4239,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         }
         for dc_name in selected_dc_names
     ])
-    st.dataframe(cooling_df, use_container_width=True, hide_index=True)
+    st.dataframe(cooling_df, width='stretch', hide_index=True)
     
     st.markdown("""
     <div class="reference-box">
@@ -4276,7 +4275,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         }
         for dc_name in selected_dc_names
     ])
-    st.dataframe(energy_calc_df, use_container_width=True, hide_index=True)
+    st.dataframe(energy_calc_df, width='stretch', hide_index=True)
     
     # Find lowest energy DC
     lowest_energy_dc = energy_calc_df.loc[energy_calc_df['Energy/Req (Wh)'].idxmin(), 'Datacenter']
@@ -4362,14 +4361,14 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         paper_bgcolor='white'
     )
     
-    st.plotly_chart(fig_det_dist, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_det_dist, config=PLOTLY_CONFIG, width='stretch')
     
     # 3.4 Heat Concentration Map
     st.markdown('<div class="subsection-header">3.4 Heat Concentration Visualization (Map #2)</div>', unsafe_allow_html=True)
     
     fig_map2 = create_geographic_map(active_datacenters, user_location, energy_only_dist,
                                      title="Heat Concentration with Energy-Only Routing")
-    st.plotly_chart(fig_map2, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_map2, config=PLOTLY_CONFIG, width='stretch')
     
     st.markdown("""
     <div class="physics-callout">
@@ -4505,7 +4504,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown("### Train vs Validation vs Test Performance")
     fig_tvt = create_train_val_test_comparison(model_results)
     if fig_tvt:
-        st.plotly_chart(fig_tvt, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_tvt, config=PLOTLY_CONFIG, width='stretch')
         
         st.markdown("""
         **Interpretation:**
@@ -4518,7 +4517,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown("### Neural Network Training Convergence")
     fig_lc = create_learning_curve_chart(model_results)
     if fig_lc:
-        st.plotly_chart(fig_lc, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_lc, config=PLOTLY_CONFIG, width='stretch')
         st_figure_downloads(fig_lc, "fig_ann_convergence")
         st.markdown("**Finding:** Loss decreases with epoch (and validation R² stabilizes when early-stopping is enabled), indicating convergence.")
 
@@ -4526,14 +4525,14 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown("### Bayesian Hyperparameter Optimization Convergence")
     fig_bo = create_bayesopt_convergence_chart(model_results)
     if fig_bo:
-        st.plotly_chart(fig_bo, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_bo, config=PLOTLY_CONFIG, width='stretch')
         st.markdown("**Finding:** Validation R² improves across BO iterations and stabilizes near the best configuration.")
 
     
     # Model comparison chart (keep existing)
     fig_model_comp = create_model_comparison_chart(model_results)
     if fig_model_comp:
-        st.plotly_chart(fig_model_comp, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_model_comp, config=PLOTLY_CONFIG, width='stretch')
     
     st.markdown(f"""
     <div class="success-box">
@@ -4547,7 +4546,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     
     fig_scatter = create_prediction_scatter(model_results, best_model_name)
     if fig_scatter:
-        st.plotly_chart(fig_scatter, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_scatter, config=PLOTLY_CONFIG, width='stretch')
     
     # 4.4 Feature Importance
     st.markdown('<div class="subsection-header">4.4 Feature Importance (Graph #5)</div>', unsafe_allow_html=True)
@@ -4555,7 +4554,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     if 'feature_importance' in model_results:
         fig_importance = create_feature_importance_chart(model_results['feature_importance'], best_model_name)
         if fig_importance:
-            st.plotly_chart(fig_importance, config=PLOTLY_CONFIG, use_container_width=True)
+            st.plotly_chart(fig_importance, config=PLOTLY_CONFIG, width='stretch')
 
         # Get top 2 features dynamically from the best model
         model_importance = model_results['feature_importance'].get(best_model_name, {})
@@ -4667,7 +4666,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     # 5.2 Strategy Summary    
     fig_traffic = create_traffic_distribution_chart(results, title="Traffic Distribution by Strategy")
     if fig_traffic:
-        st.plotly_chart(fig_traffic, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_traffic, config=PLOTLY_CONFIG, width='stretch')
     
     # 5.4 Cooling Configuration
     st.markdown('<div class="subsection-header">5.3 Cooling Technology Configuration</div>', unsafe_allow_html=True)
@@ -4730,19 +4729,19 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         }
         for strategy in results.keys()
     ])
-    st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+    st.dataframe(metrics_df, width='stretch', hide_index=True)
     
     # 6.2 Multi-metric Chart
     st.markdown('<div class="subsection-header">6.2 Multi-Metric Comparison (Graph #7)</div>', unsafe_allow_html=True)
     
     fig_metrics = create_metrics_comparison_chart(results)
-    st.plotly_chart(fig_metrics, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_metrics, config=PLOTLY_CONFIG, width='stretch')
     
     # 6.3 Heat Distribution
     st.markdown('<div class="subsection-header">6.3 Heat Distribution by Strategy (Graph #8)</div>', unsafe_allow_html=True)
     
     fig_heat = create_heat_distribution_chart(results)
-    st.plotly_chart(fig_heat, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_heat, config=PLOTLY_CONFIG, width='stretch')
     
     # 6.4 Final Map
     st.markdown('<div class="subsection-header">6.4 Geographic Distribution (Map #3)</div>', unsafe_allow_html=True)
@@ -4759,7 +4758,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         results[map_strategy]['distribution'],
         title=f"Traffic Distribution: {map_strategy} Strategy"
     )
-    st.plotly_chart(fig_map3, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_map3, config=PLOTLY_CONFIG, width='stretch')
     
   # 6.5 Final Recommendation
     st.markdown('<div class="subsection-header">6.5 Final Recommendation</div>', unsafe_allow_html=True)
@@ -4844,13 +4843,13 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         st.markdown('<div class="subsection-header">7.2 Distribution Analysis (Graphs #9-12)</div>', unsafe_allow_html=True)
         
         fig_mc_box = create_monte_carlo_boxplots(mc_results)
-        st.plotly_chart(fig_mc_box, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_mc_box, config=PLOTLY_CONFIG, width='stretch')
 
         st_figure_downloads(fig_mc_box, "fig_mc_boxplots")
 
         st.markdown("#### 7.2.1 Mean ± 95% CI of the mean")
         fig_mc_ci = create_monte_carlo_mean_ci_chart(mc_results)
-        st.plotly_chart(fig_mc_ci, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_mc_ci, config=PLOTLY_CONFIG, width='stretch')
         st_figure_downloads(fig_mc_ci, "fig_mc_mean_ci")
 
         st.markdown("#### 7.2.2 Distribution overlay (Peak ΔT-AR)")
@@ -4859,7 +4858,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             title="Monte Carlo Distribution Overlay: Peak ΔT-AR (°C)",
             x_label="Peak ΔT-AR (°C)"
         )
-        st.plotly_chart(fig_mc_hist, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_mc_hist, config=PLOTLY_CONFIG, width='stretch')
         st_figure_downloads(fig_mc_hist, "fig_mc_peak_ΔT_overlay")
 
         st.markdown("#### 7.2.3 Monte Carlo convergence (running mean of Peak ΔT-AR)")
@@ -4868,7 +4867,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             title="Monte Carlo Convergence: Running Mean of Peak ΔT-AR (°C)",
             y_label="Running mean Peak ΔT-AR (°C)"
         )
-        st.plotly_chart(fig_mc_conv, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_mc_conv, config=PLOTLY_CONFIG, width='stretch')
         st_figure_downloads(fig_mc_conv, "fig_mc_peak_ΔT_convergence")
 
         
@@ -4950,7 +4949,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     # Display results if they exist
     if st.session_state.temp_sensitivity is not None:
         fig_temp_sens = create_sensitivity_temperature_chart(st.session_state.temp_sensitivity)
-        st.plotly_chart(fig_temp_sens, config=PLOTLY_CONFIG, use_container_width=True)
+        st.plotly_chart(fig_temp_sens, config=PLOTLY_CONFIG, width='stretch')
         
         st.markdown("""
         **Finding:** Energy-Only strategy becomes increasingly worse as ambient temperatures rise, 
@@ -4972,7 +4971,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
             'Status': '✅ Balanced' if eligible_count >= 2 else '⚠️ Limited' if eligible_count == 1 else '❌ None'
         })
     
-    st.dataframe(pd.DataFrame(latency_analysis), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(latency_analysis), width='stretch', hide_index=True)
     
     st.markdown("""
     **Finding:** Lower latency thresholds naturally prevent Cold DC concentration by excluding 
@@ -5078,7 +5077,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
                 }
             ])
             
-            st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+            st.dataframe(comparison_df, width='stretch', hide_index=True)
             
                # Visualization
             fig_scenario = create_scenario_comparison_chart(
@@ -5088,7 +5087,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
                 "Alternative Configuration"
             )
             if fig_scenario:
-                st.plotly_chart(fig_scenario, config=PLOTLY_CONFIG, use_container_width=True)
+                st.plotly_chart(fig_scenario, config=PLOTLY_CONFIG, width='stretch')
         else:
             st.info("👆 Click the button above to run scenario comparison")
     
@@ -5103,7 +5102,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown('<div class="subsection-header">10.1 24-Hour Carbon Curves (Graph #17)</div>', unsafe_allow_html=True)
     
     fig_carbon = create_carbon_intensity_curves()
-    st.plotly_chart(fig_carbon, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_carbon, config=PLOTLY_CONFIG, width='stretch')
     
     # 10.2 Data Sources
     st.markdown('<div class="subsection-header">10.2 Data Sources</div>', unsafe_allow_html=True)
@@ -5129,7 +5128,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown('<div class="subsection-header">11.1 Cooling Effectiveness Matrix (Graph #18)</div>', unsafe_allow_html=True)
     
     fig_cooling_matrix = create_cooling_effectiveness_heatmap()
-    st.plotly_chart(fig_cooling_matrix, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_cooling_matrix, config=PLOTLY_CONFIG, width='stretch')
     
     st.markdown("""
     **Legend:** ✓ = Optimal | ○ = Acceptable | ✗ = Not Recommended
@@ -5141,7 +5140,7 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
     st.markdown('<div class="subsection-header">11.2 PUE Comparison (Graph #19)</div>', unsafe_allow_html=True)
     
     fig_pue = create_pue_comparison_chart()
-    st.plotly_chart(fig_pue, config=PLOTLY_CONFIG, use_container_width=True)
+    st.plotly_chart(fig_pue, config=PLOTLY_CONFIG, width='stretch')
     
     st.markdown("""
     **Interpretation:** 
