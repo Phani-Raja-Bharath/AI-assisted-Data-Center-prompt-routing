@@ -5290,8 +5290,8 @@ help="Limits max energy draw per DC in megawatts. Used to cap request allocation
         if pdf_data:
             st.download_button(
                 label="📄 Download PDF Report",
-                data=pdf_data,
-                file_name=f"ΔT-AR_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                data=bytes(pdf_data),
+                file_name=f"Delta-T-AR_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
                 mime="application/pdf",
                 help="Download a complete PDF report with metrics and recommendations"
             )
