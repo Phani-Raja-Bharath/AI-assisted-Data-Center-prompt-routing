@@ -8,6 +8,7 @@ runOnSave = true
 toolbarMode = "viewer"
 
 [theme]
+base = "dark"
 # Shared by light and dark. Per-mode colors live in [theme.light] / [theme.dark];
 # keep them in sync with the light-dark() colors in dashboard_ui.py (render_dashboard).
 font = "Aptos, Calibri, sans-serif"

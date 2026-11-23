@@ -811,9 +811,9 @@ STRATEGY_GUIDE = [
     ("Random", ":material/shuffle:", "Splits requests at random.",
      "Reference baseline for comparison; never recommended."),
     ("Energy-Only", ":material/bolt:", "Favors the sites with the lowest predicted energy per request.",
-     "Each site's weight is (lowest energy ÷ its energy)³."),
+     "Directs more requests to lower-energy sites while respecting the shared limits."),
     ("Heat-Only", ":material/local_fire_department:", "Favors the site with the lowest temperature rise per request.",
-     "Each site's weight is (lowest rise ÷ its rise)³."),
+     "Directs more requests to sites with less modeled warming per request; concentrating traffic can still increase peak heating."),
     ("ΔT-AR", ":material/thermostat:", "Splits requests so every site warms equally.",
      "Minimizes the peak modeled temperature rise (ΔT-AR) across sites."),
     ("Multi-Objective", ":material/balance:", "Scores each site on energy, latency, carbon and local heat.",
@@ -1133,7 +1133,8 @@ def render_dashboard(namespace):
 
     /* Cards: one surface, one border, one padding everywhere. */
     .st-key-experiment_panel, .st-key-header_weather, .st-key-routing_atlas,
-    .st-key-allocation_panel, .st-key-results_summary, .st-key-strategy_guide, .st-key-models_note {
+    .st-key-allocation_panel, .st-key-results_summary, .st-key-strategy_guide, .st-key-models_note,
+    .st-key-period_retrain {
         background: light-dark(#ffffff, #121e22);
         border: 1px solid light-dark(#dbe5e8, #22343a); border-radius: 10px;
         padding: 1rem 1.15rem; box-shadow: 0 1px 2px rgba(0, 0, 0, .06); }
