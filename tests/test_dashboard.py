@@ -23,7 +23,7 @@ def test_dashboard_reuses_models_and_retrains_only_on_request(monkeypatch, tmp_p
     at = AppTest.from_string("import ai_assisted_datacenter_allocation as app\napp.main()")
     at.run(timeout=30)
     assert not at.exception
-    at.radio[0].set_value("Multiple Linear Regression (MLR) only").run()
+    at.selectbox(key="ui_radio_3521").set_value("Multiple Linear Regression (MLR) only").run()
     for checkbox in at.checkbox:
         if checkbox.label == "Enable Monte Carlo Analysis":
             checkbox.uncheck()
@@ -36,7 +36,7 @@ def test_dashboard_reuses_models_and_retrains_only_on_request(monkeypatch, tmp_p
     at.run(timeout=30)
     assert not at.exception and calls == ["mlr"]
     previous_key = at.session_state["sim_key"]
-    capacity = next(s for s in at.slider if s.label == "Max Power Capacity per Datacenter (MW)")
+    capacity = next(s for s in at.slider if s.label == "Max share per site (%)")
     capacity.set_value(50).run(timeout=30)
     assert not at.exception and calls == ["mlr"]
     assert at.session_state["sim_key"] != previous_key
@@ -48,7 +48,7 @@ def test_dashboard_reuses_models_and_retrains_only_on_request(monkeypatch, tmp_p
     # A new browser session must load the saved bundle before training.
     fresh = AppTest.from_string("import ai_assisted_datacenter_allocation as app\napp.main()")
     fresh.run(timeout=30)
-    fresh.radio[0].set_value("Multiple Linear Regression (MLR) only").run()
+    fresh.selectbox(key="ui_radio_3521").set_value("Multiple Linear Regression (MLR) only").run()
     next(c for c in fresh.checkbox if c.label == "Enable Monte Carlo Analysis").uncheck()
     fresh.button(key="run_sim_btn").click().run(timeout=30)
     assert not fresh.exception and calls == ["mlr", "mlr"]
@@ -59,7 +59,7 @@ def test_monte_carlo_passes_constraints_and_counts_unserved(monkeypatch):
     original = app.run_simulation
 
     def capture(*args, **kwargs):
-        calls.append((args[-2:], kwargs))
+        calls.append((args[-3:], kwargs))
         return original(*args, **kwargs)
 
     monkeypatch.setattr(app, "run_simulation", capture)
@@ -67,6 +67,6 @@ def test_monte_carlo_passes_constraints_and_counts_unserved(monkeypatch):
     weather = {"a": {"temperature": 20, "humidity": 50, "wind_speed": 5}}
     result = app.run_monte_carlo(dc, weather, (0, 0), 100, {"a": "free_air"}, 2, None,
                                  n_runs=2, latency_threshold=1, max_dc_capacity_mw=0.000001)
-    assert all(args == (1, 0.000001) for args, _ in calls)
+    assert all(args == (1, 0.000001, 1.0) for args, _ in calls)
     assert result["Multi-Objective"]["raw_data"]["served_requests"].sum() == 0
     assert result["Multi-Objective"]["raw_data"]["unserved_requests"].min() > 0

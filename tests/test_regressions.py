@@ -118,6 +118,27 @@ def test_all_policies_respect_total_capacity_with_energy_multiplier(policy):
         assert count >= 0 and count * energies[dc] <= 10
 
 
+@pytest.mark.parametrize("policy", [route_random, route_energy_only, route_heat_only, route_ΔT_aware,
+                                    route_multi_objective])
+@pytest.mark.parametrize("share", [0.3, 0.5, 1.0])
+def test_all_policies_respect_max_site_share(policy, share):
+    kwargs: dict = dict(datacenters=DC, weather_data=WEATHER, cooling_selections=COOLING,
+                        num_requests=1000, max_site_share=share)
+    if policy is route_multi_objective:
+        kwargs.update(user_location=(28.5, -81.3), latency_threshold=10_000)
+    dist = policy(**kwargs)
+    assert all(count <= 1000 * share for count in dist.values())
+    # Two sites can absorb at most 2 × share of the batch; the rest stays unserved.
+    assert sum(dist.values()) == min(1000, int(2 * 1000 * share))
+
+
+def test_max_site_share_must_be_a_fraction():
+    with pytest.raises(ValueError):
+        route_energy_only(DC, WEATHER, COOLING, 100, max_site_share=0)
+    with pytest.raises(ValueError):
+        route_energy_only(DC, WEATHER, COOLING, 100, max_site_share=1.5)
+
+
 def test_multi_objective_enforces_latency_at_allocated_load():
     dist = route_multi_objective(DC, WEATHER, COOLING, (28.5, -81.3), 1000, latency_threshold=50)
     assert dist["far"] == 0 and 0 < dist["near"] < 1000
@@ -125,6 +146,40 @@ def test_multi_objective_enforces_latency_at_allocated_load():
     assert calculate_latency(0, (dist["near"] + 1) / 1000) > 50
     assert sum(route_multi_objective(DC, WEATHER, COOLING, (28.5, -81.3), 1000,
                                     latency_threshold=1).values()) == 0
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_ΔT_aware_minimizes_peak_ΔT_among_fully_served_policies(seed):
+    """ΔT-AR must reach the lowest peak ΔT-AR (as the simulation computes it) of all
+    strategies that serve every request, and match the equal-warming optimum."""
+    from energy_model import calculate_ΔT_contribution
+    rng = np.random.default_rng(seed)
+    sites = {f"dc{i}": {"lat": float(rng.uniform(-50, 60)), "lon": float(rng.uniform(-150, 150)),
+                        "default_cooling": str(rng.choice(COOLING_TYPES)), "region": "default"}
+             for i in range(3)}
+    weather = {dc: {"temperature": float(rng.uniform(-5, 42)), "humidity": float(rng.uniform(10, 95)),
+                    "wind_speed": float(rng.uniform(0, 12))} for dc in sites}
+    cooling = {dc: info["default_cooling"] for dc, info in sites.items()}
+    requests = 1000
+    energies = energy_map(sites, weather, cooling, None, 1.0)
+    per_request = {dc: calculate_ΔT_contribution(energies[dc] / 1000, wind_speed=weather[dc]["wind_speed"])
+                   for dc in sites}
+
+    def peak(dist):
+        return max(count * per_request[dc] for dc, count in dist.items())
+
+    common = dict(datacenters=sites, weather_data=weather, cooling_selections=cooling, num_requests=requests)
+    policies = {"Random": route_random(**common), "Energy-Only": route_energy_only(**common),
+                "Heat-Only": route_heat_only(**common),
+                "Multi-Objective": route_multi_objective(**common, user_location=(0, 0), latency_threshold=10_000)}
+    aware = route_ΔT_aware(**common)
+    assert sum(aware.values()) == requests
+    tolerance = max(per_request.values())  # integer rounding moves at most ~one request per site
+    for name, dist in policies.items():
+        if sum(dist.values()) == requests:
+            assert peak(aware) <= peak(dist) + tolerance, name
+    optimum = requests / sum(1 / value for value in per_request.values())
+    assert peak(aware) <= optimum + tolerance
 
 
 def test_cooling_encoding_used_by_prediction():

@@ -29,10 +29,16 @@ def energy_map(datacenters, weather_data, cooling_selections, ai_models, energy_
     return energies
 
 
-def _allocate(weights, energies, num_requests, max_dc_capacity_mw, latency_caps=None):
+def _allocate(weights, energies, num_requests, max_dc_capacity_mw, latency_caps=None, max_site_share=1.0):
+    """Allocate requests by weight within each site's caps: the power budget
+    (``max_dc_capacity_mw``), an optional latency cap, and ``max_site_share``, the largest
+    fraction of the batch any one site may take (1.0 = no share limit)."""
     if not math.isfinite(max_dc_capacity_mw) or max_dc_capacity_mw < 0:
         raise ValueError('Datacenter capacity must be finite and nonnegative.')
-    capacities = {dc: min(num_requests, int(max_dc_capacity_mw * 1e6 / energy))
+    if not math.isfinite(max_site_share) or not 0 < max_site_share <= 1:
+        raise ValueError('Maximum site share must be in (0, 1].')
+    share_cap = math.floor(num_requests * max_site_share + 1e-9)
+    capacities = {dc: min(num_requests, share_cap, int(max_dc_capacity_mw * 1e6 / energy))
                   for dc, energy in energies.items()}
     if latency_caps is not None:
         capacities = {dc: min(cap, latency_caps.get(dc, 0)) for dc, cap in capacities.items()}
@@ -40,27 +46,27 @@ def _allocate(weights, energies, num_requests, max_dc_capacity_mw, latency_caps=
 
 
 def route_random(datacenters, num_requests, weather_data=None, cooling_selections=None,
-                 ai_models=None, max_dc_capacity_mw=100, energy_multiplier=1.0):
+                 ai_models=None, max_dc_capacity_mw=100, energy_multiplier=1.0, max_site_share=1.0):
     if not datacenters or num_requests <= 0:
         return {}
     energies = energy_map(datacenters, weather_data or {}, cooling_selections or {},
                           ai_models, energy_multiplier)
     weights = dict(zip(datacenters, np.random.dirichlet(np.ones(len(datacenters)))))
-    return _allocate(weights, energies, num_requests, max_dc_capacity_mw)
+    return _allocate(weights, energies, num_requests, max_dc_capacity_mw, max_site_share=max_site_share)
 
 
 def route_energy_only(datacenters, weather_data, cooling_selections, num_requests,
-                      ai_models=None, max_dc_capacity_mw=100, energy_multiplier=1.0):
+                      ai_models=None, max_dc_capacity_mw=100, energy_multiplier=1.0, max_site_share=1.0):
     if not datacenters or num_requests <= 0:
         return {}
     energies = energy_map(datacenters, weather_data, cooling_selections, ai_models, energy_multiplier)
     best = min(energies.values())
     weights = {dc: (best / energy) ** 3 for dc, energy in energies.items()}
-    return _allocate(weights, energies, num_requests, max_dc_capacity_mw)
+    return _allocate(weights, energies, num_requests, max_dc_capacity_mw, max_site_share=max_site_share)
 
 
 def route_heat_only(datacenters, weather_data, cooling_selections, num_requests,
-                    ai_models=None, max_dc_capacity_mw=100, energy_multiplier=1.0):
+                    ai_models=None, max_dc_capacity_mw=100, energy_multiplier=1.0, max_site_share=1.0):
     if not datacenters or num_requests <= 0:
         return {}
     energies = energy_map(datacenters, weather_data, cooling_selections, ai_models, energy_multiplier)
@@ -69,27 +75,32 @@ def route_heat_only(datacenters, weather_data, cooling_selections, num_requests,
               for dc, energy in energies.items()}
     best = min(scores.values())
     weights = {dc: (best / max(score, 1e-15)) ** 3 for dc, score in scores.items()}
-    return _allocate(weights, energies, num_requests, max_dc_capacity_mw)
+    return _allocate(weights, energies, num_requests, max_dc_capacity_mw, max_site_share=max_site_share)
 
 
 def route_ΔT_aware(datacenters, weather_data, cooling_selections, num_requests,
-                  ai_models=None, max_dc_capacity_mw=100, energy_multiplier=1.0):
+                  ai_models=None, max_dc_capacity_mw=100, energy_multiplier=1.0, max_site_share=1.0):
     if not datacenters or num_requests <= 0:
         return {}
+    """Minimize the peak modeled ΔT-AR across sites.
+
+    Each site's ΔT is the same quantity the simulation reports: requests × ΔT per request,
+    where ΔT per request = calculate_ΔT_contribution(energy per request, wind). The peak is
+    lowest when every site warms equally, i.e. requests ∝ 1 / (ΔT per request). Capacity
+    limits are applied afterwards; demand a capped site cannot take is redistributed in the
+    same proportions by ``allocate_requests``.
+    """
     energies = energy_map(datacenters, weather_data, cooling_selections, ai_models, energy_multiplier)
-    scores = {}
-    for dc, energy in energies.items():
-        weather = weather_data.get(dc, {})
-        vulnerability = 1 + 0.05 * max(0, weather.get('temperature', 20) - 25)
-        scores[dc] = energy * vulnerability / (1 + 0.05 * weather.get('wind_speed', 5))
-    best = min(scores.values())
-    weights = {dc: best / score for dc, score in scores.items()}
-    return _allocate(weights, energies, num_requests, max_dc_capacity_mw)
+    per_request = {dc: calculate_ΔT_contribution(energy / 1000,
+                                                 wind_speed=weather_data.get(dc, {}).get('wind_speed', 5))
+                   for dc, energy in energies.items()}
+    weights = {dc: 1 / max(value, 1e-15) for dc, value in per_request.items()}
+    return _allocate(weights, energies, num_requests, max_dc_capacity_mw, max_site_share=max_site_share)
 
 
 def route_multi_objective(datacenters, weather_data, cooling_selections, user_location,
                           num_requests, ai_models=None, latency_threshold=100,
-                          max_dc_capacity_mw=100, energy_multiplier=1.0):
+                          max_dc_capacity_mw=100, energy_multiplier=1.0, max_site_share=1.0):
     """Balance four costs, subject to power capacity and modeled latency bounds.
 
     Demand that cannot meet both constraints remains unserved.
@@ -114,4 +125,4 @@ def route_multi_objective(datacenters, weather_data, cooling_selections, user_lo
         scores[dc] = 0.25 * (energies[dc] + latency / reference + carbon / 0.7 + thermal)
     best = min(scores.values()) if scores else 0
     weights = {dc: math.exp(-(score - best) * 3) for dc, score in scores.items()}
-    return _allocate(weights, energies, num_requests, max_dc_capacity_mw, latency_caps)
+    return _allocate(weights, energies, num_requests, max_dc_capacity_mw, latency_caps, max_site_share)

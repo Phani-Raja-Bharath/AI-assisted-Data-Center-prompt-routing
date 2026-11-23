@@ -757,7 +757,7 @@ def engineer_features(df):
     df["pue"] = df["cooling_type"].apply(get_pue_from_cooling)
 
     # 2. Simple datacenter-level features (you can refine later per-DC)
-    #    For now, use reasonable defaults — these can be made DC-specific later.
+    #    For now, use reasonable defaults; these can be made DC-specific later.
     df["base_capacity_mw"] = 50.0       # assume 50 MW DC
     df["urban_density"] = 0.7           # assume relatively dense urban siting
     df["carbon_intensity"] = 0.300      # kgCO2/kWh, generic grid mix
@@ -1280,9 +1280,10 @@ class AIModelSuite:
 # ============================================================================
 def run_simulation(datacenters, weather_data, user_location, num_requests,
                    cooling_selections, energy_multiplier=1.0, ai_models=None,
-                   latency_threshold=100, max_dc_capacity_mw=100):
+                   latency_threshold=100, max_dc_capacity_mw=100, max_site_share=1.0):
     """
     Run complete simulation for all routing strategies.
+    ``max_site_share`` caps the fraction of the batch any one datacenter may take.
     Returns comprehensive metrics for comparison.
 
     Fixes included:
@@ -1298,16 +1299,21 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
     hour = datetime.now().hour
 
     strategies = {
-        'Random': route_random(datacenters, num_requests, weather_data, cooling_selections, ai_models, max_dc_capacity_mw, energy_multiplier),
+        'Random': route_random(datacenters, num_requests, weather_data, cooling_selections, ai_models, max_dc_capacity_mw, energy_multiplier,
+                                         max_site_share=max_site_share),
         'Energy-Only': route_energy_only(datacenters, weather_data, cooling_selections,
-                                         num_requests, ai_models, max_dc_capacity_mw, energy_multiplier),
+                                         num_requests, ai_models, max_dc_capacity_mw, energy_multiplier,
+                                         max_site_share=max_site_share),
         'Heat-Only': route_heat_only(datacenters, weather_data, cooling_selections,
-                                     num_requests, ai_models, max_dc_capacity_mw, energy_multiplier),
+                                     num_requests, ai_models, max_dc_capacity_mw, energy_multiplier,
+                                         max_site_share=max_site_share),
         'ΔT-AR': route_ΔT_aware(datacenters, weather_data, cooling_selections,
-                                num_requests, ai_models, max_dc_capacity_mw, energy_multiplier),
+                                num_requests, ai_models, max_dc_capacity_mw, energy_multiplier,
+                                         max_site_share=max_site_share),
         'Multi-Objective': route_multi_objective(datacenters, weather_data, cooling_selections,
                                                  user_location, num_requests, ai_models,
-                                                 latency_threshold, max_dc_capacity_mw, energy_multiplier)
+                                                 latency_threshold, max_dc_capacity_mw, energy_multiplier,
+                                         max_site_share=max_site_share)
     }
 
     results = {}
@@ -1446,7 +1452,7 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
 
 def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
                     cooling_selections, energy_multiplier, ai_models, n_runs=100,
-                    latency_threshold=100, max_dc_capacity_mw=100):
+                    latency_threshold=100, max_dc_capacity_mw=100, max_site_share=1.0):
     """
     Run Monte Carlo simulation with stochastic weather variations.
     """
@@ -1472,7 +1478,7 @@ def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
         results = run_simulation(
             datacenters, varied_weather, user_location,
             varied_requests, cooling_selections, energy_multiplier, ai_models,
-            latency_threshold, max_dc_capacity_mw
+            latency_threshold, max_dc_capacity_mw, max_site_share
         )
         
         for strategy, data in results.items():
@@ -1711,19 +1717,33 @@ def create_prediction_scatter(model_metrics, model_name='ANN'):
     y_pred = model_metrics[model_name]['predictions']
     r2 = model_metrics[model_name]['r2']
     
+    y_test, y_pred = np.asarray(y_test, dtype=float), np.asarray(y_pred, dtype=float)
+    total_points = len(y_test)
+
     # Calculate residuals for color
     residuals = y_test - y_pred
-    
+
+    # Drawing every test prediction (100k+) stalls the browser. Plot a fixed random sample
+    # with WebGL; R² above is still computed on the full test set.
+    max_points = 4000
+    if total_points > max_points:
+        sample = np.sort(np.random.default_rng(0).choice(total_points, max_points, replace=False))
+        shown_test, shown_pred, shown_residuals = y_test[sample], y_pred[sample], residuals[sample]
+    else:
+        shown_test, shown_pred, shown_residuals = y_test, y_pred, residuals
+    sample_note = (f" · {len(shown_test):,} of {total_points:,} points shown"
+                   if total_points > max_points else "")
+
     fig = go.Figure()
-    
+
     # Scatter points
-    fig.add_trace(go.Scatter(
-        x=y_test,
-        y=y_pred,
+    fig.add_trace(go.Scattergl(
+        x=shown_test,
+        y=shown_pred,
         mode='markers',
         marker=dict(
             size=5,
-            color=residuals,
+            color=shown_residuals,
             colorscale='RdYlBu',
             showscale=True,
             colorbar=dict(title='<b>Residual</b>', x=1.02),
@@ -1746,7 +1766,7 @@ def create_prediction_scatter(model_metrics, model_name='ANN'):
     ))
     
     fig.update_layout(
-        title=dict(text=f"<b>{model_name}: Predicted vs Actual (R² = {r2:.4f})</b>",
+        title=dict(text=f"<b>{model_name}: Predicted vs Actual (R² = {r2:.4f}){sample_note}</b>",
                   font=dict(size=48, family='Times New Roman', color='#000000')),
         xaxis_title=dict(text="<b>Actual Energy (Wh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
         yaxis_title=dict(text="<b>Predicted Energy (Wh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
@@ -1869,7 +1889,7 @@ def create_metrics_comparison_chart(results):
         'Energy (Wh)': [results[s]['totals']['energy_wh'] for s in strategies],
         'Carbon (g)': [results[s]['totals']['carbon_g'] for s in strategies],
         'Latency (ms)': [results[s]['totals']['avg_latency_ms'] for s in strategies],
-        'Peak ΔT-AR (°C×100)': [results[s]['totals']['peak_ΔT'] * 100 for s in strategies],
+        'Peak ΔT-AR (µ°C, ×10⁶)': [results[s]['totals']['peak_ΔT'] * 1e6 for s in strategies],
         'Heat CV (×100)': [results[s]['totals']['heat_cv'] * 100 for s in strategies]
     }
     
@@ -2506,10 +2526,10 @@ def create_scenario_comparison_chart(scenario_a, scenario_b, scenario_a_name, sc
     Graph #16 in the dashboard.
     """
     metrics = ['energy_wh', 'carbon_g', 'avg_latency_ms', 'peak_ΔT', 'heat_cv']
-    metric_labels = ['Energy (Wh)', 'Carbon (g)', 'Latency (ms)', 'Peak ΔT-AR (°C)', 'Heat CV']
+    metric_labels = ['Energy (Wh)', 'Carbon (g)', 'Latency (ms)', 'Peak ΔT-AR (µ°C, ×10⁶)', 'Heat CV']
     
-    values_a = [scenario_a['totals'][m] if m != 'peak_ΔT' else scenario_a['totals'][m] * 100 for m in metrics]
-    values_b = [scenario_b['totals'][m] if m != 'peak_ΔT' else scenario_b['totals'][m] * 100 for m in metrics]
+    values_a = [scenario_a['totals'][m] if m != 'peak_ΔT' else scenario_a['totals'][m] * 1e6 for m in metrics]
+    values_b = [scenario_b['totals'][m] if m != 'peak_ΔT' else scenario_b['totals'][m] * 1e6 for m in metrics]
     
     fig = go.Figure()
     

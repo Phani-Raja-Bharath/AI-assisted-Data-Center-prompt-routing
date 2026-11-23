@@ -67,7 +67,7 @@ def test_neuquen_location_weather_map_routing_and_carbon(monkeypatch, tmp_path, 
     at.multiselect[0].set_value(["Neuquén, Argentina", "Phoenix, AZ"]).run(timeout=30)
     assert not at.exception
     assert (-38.95, -68.067, "Neuquén, Argentina") in weather_calls
-    at.radio[0].set_value("Multiple Linear Regression (MLR) only").run()
+    at.selectbox(key="ui_radio_3521").set_value("Multiple Linear Regression (MLR) only").run()
     next(c for c in at.checkbox if c.label == "Enable Monte Carlo Analysis").uncheck()
     at.button(key="run_sim_btn").click().run(timeout=30)
     assert not at.exception

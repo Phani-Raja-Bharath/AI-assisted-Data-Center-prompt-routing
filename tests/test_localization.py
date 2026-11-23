@@ -88,7 +88,7 @@ def test_language_toggle_keeps_experiment_models_and_result_cache(monkeypatch, t
     at = AppTest.from_string("import ai_assisted_datacenter_allocation as app\napp.main()")
     at.run(timeout=30)
     assert "not requests per second" in at.slider(key="ui_slider_3454").proto.help
-    at.radio[0].set_value("Multiple Linear Regression (MLR) only").run()
+    at.selectbox(key="ui_radio_3521").set_value("Multiple Linear Regression (MLR) only").run()
     next(s for s in at.slider if s.label == "Total Requests").set_value(2300)
     next(c for c in at.checkbox if c.label == "Enable Monte Carlo Analysis").uncheck()
     at.button(key="run_sim_btn").click().run(timeout=30)
@@ -104,16 +104,21 @@ def test_language_toggle_keeps_experiment_models_and_result_cache(monkeypatch, t
     assert at.session_state["sim_receipt"] == receipt
     assert not at.session_state["sim_executed_this_render"]
     assert next(iter(at.session_state["model_bundles"].values()))["revision"] == revision
-    assert at.radio[0].value == "Multiple Linear Regression (MLR) only"
+    assert at.selectbox(key="ui_radio_3521").value == "Multiple Linear Regression (MLR) only"
     assert next(s for s in at.slider if s.label == "Número total de solicitudes").value == 2300
     assert "no solicitudes por segundo" in at.slider(key="ui_slider_3454").proto.help
     assert at.button(key="run_sim_btn").label == "Ejecutar simulación"
     assert at.title[0].value == "AI-Assisted Datacenter Prompt Routing for ΔT-AR Mitigation"
     assert any("Modelos disponibles: sesión" in item.value for item in at.caption)
+    at.button(key="open_help").click().run(timeout=30)
+    assert not at.exception
     provenance = next(frame.value for frame in at.dataframe if "Clasificación" in frame.value.columns)
     assert any("Supuestos" in str(value) for value in provenance["Clasificación"])
     # Original scientific data is not translated or mutated.
     assert set(results) == {"Random", "Energy-Only", "Heat-Only", "ΔT-AR", "Multi-Objective"}
+    at.button(key="back_to_dashboard").click().run(timeout=30)
+    assert not at.exception and calls == ["mlr"]
+    assert at.session_state["sim_receipt"] == receipt
     at.toggle(key="spanish_ui").set_value(False).run(timeout=30)
     assert not at.exception and calls == ["mlr"]
     assert at.button(key="run_sim_btn").label == "Run simulation"

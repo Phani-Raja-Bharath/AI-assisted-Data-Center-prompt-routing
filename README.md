@@ -87,7 +87,7 @@ All consumed energy becomes waste heat. The temperature-rise proxy scales with h
 | Random | Dirichlet-weighted random baseline |
 | Energy-Only | Favors lower energy per request |
 | Heat-Only | Favors lower wind-adjusted temperature-rise contribution per request |
-| Delta-T-Aware (Delta-T-AR) | Penalizes energy use and thermal vulnerability |
+| Delta-T-Aware (Delta-T-AR) | Minimizes the peak modeled temperature rise: splits requests so every site warms equally (requests ∝ 1 / ΔT per request), within capacity limits |
 | Multi-Objective | Balances energy, latency, carbon, and thermal vulnerability |
 
 All policies respect power capacity over an assumed one-hour window, including the energy multiplier. Multi-Objective also limits each site's allocation so its modeled latency meets the selected threshold. Infeasible demand remains **unserved** and is reported explicitly. Recommendations prefer policies serving the full workload; if none do, they prefer the highest service count before comparing heat. Compare service rates alongside energy and heat, especially in deliberately constrained scenarios.
