@@ -1,0 +1,3 @@
+-r requirements-neon.txt
+pytest>=8.0
+ty>=0.0.108

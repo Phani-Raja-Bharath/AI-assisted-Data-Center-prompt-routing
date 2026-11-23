@@ -1,0 +1,20 @@
+{
+  "name": "climate-aware-datacenter-routing",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && node scripts/build.mjs",
+    "start": "node scripts/python.mjs -m streamlit run ai_assisted_datacenter_allocation.py",
+    "test": "node scripts/python.mjs -m pytest tests -q",
+    "db:verify": "node scripts/python.mjs scripts/verify_neon.py"
+  },
+  "dependencies": {
+    "@neon/config": "^1.14.6",
+    "@neon/env": "^2.1.9"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

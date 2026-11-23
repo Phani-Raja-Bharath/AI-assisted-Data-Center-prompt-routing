@@ -7,43 +7,23 @@
 pip install -r requirements.txt
 
 # 2. Run the dashboard
-streamlit run uhi_dashboard_complete.py
+streamlit run ai_assisted_datacenter_allocation.py
 ```
 
 ## Features
 
-### 13 Sections
-1. **Experimental Setup** - Configure user location, datacenter selection, parameters
-2. **Real-Time Climatic Conditions** - Live weather data, initial recommendation
-3. **The Deterministic Problem** - Stockholm Concentration demonstration
-4. **AI Model Training** - MLR, ANN, Bayesian comparison
-5. **Routing Strategy Comparison** - 4 strategies compared
-6. **Comprehensive Results** - Full metrics and recommendation
-7. **Monte Carlo Validation** - Statistical significance testing
-8. **Sensitivity Analysis** - Temperature, latency impact
-9. **What-If Scenarios** - User-created comparisons
-10. **Carbon Intensity Analysis** - 24-hour grid patterns
-11. **Cooling Technology Analysis** - Effectiveness matrix
-12. **Academic References** - All citations
-13. **Executive Summary** - Key findings + export
+### Four focused workspaces
+- **Overview**: key metrics, routing map, traffic split, recommendation, and expandable source data.
+- **Routing**: strategy comparison, service coverage, cooling controls, and carbon patterns.
+- **Models**: training provenance, model comparison, diagnostics, and explicit retraining.
+- **Experiments**: Monte Carlo, temperature sensitivity, and what-if scenarios, executed only when requested.
 
-### 21 Graphs
-- 3 Geographic maps
-- Traffic distribution charts
-- Model performance comparison
-- Prediction scatter plots
-- Feature importance
-- Heat distribution
-- Monte Carlo box plots
-- Sensitivity curves
-- Carbon intensity patterns
-- Cooling effectiveness heatmap
-- PUE comparison
+Configure location, datacenters, workload, and constraints in the sidebar. Use the top **Español** switch for technical Spanish. Open **Sources and methodology** to distinguish published data from model assumptions. View changes preserve models and cached results.
 
 ### Key Features
-- **All values are DYNAMICALLY CALCULATED** - no hardcoded results
+- Results are calculated from modeled inputs; constants and fallback weather are assumptions
 - Real-time weather from Open-Meteo API
-- Research-backed PUE values (Alkrush et al., 2024)
+- Explicit PUE scenario assumptions, with Alkrush et al. (2024) cited for cooling context
 - Statistical significance testing with scipy
 - Adjustable parameters via sliders
 - PDF/CSV export
@@ -51,9 +31,9 @@ streamlit run uhi_dashboard_complete.py
 ## Research Contribution
 
 This dashboard demonstrates the **Stockholm Concentration Problem**:
-- Energy-only routing concentrates 70-80% traffic at coldest DC
+- Energy-only routing can concentrate traffic at the most energy-efficient DC
 - Creates localized heat dissipation defeating sustainability goals
-- Multi-objective routing reduces UHI by 40-60% with <10% energy overhead
+- Multi-objective routing compares heat, energy, carbon, and latency; reductions depend on the scenario
 
 ## Citation
 
@@ -66,3 +46,7 @@ IDS6938 - AI, Energy, and Sustainability. University of Central Florida.
 - Stern (2025) - Energy per AI prompt
 - Yang et al. (2024) - UHI formula
 - Luccioni & Hernandez-Garcia (2023) - Carbon emissions
+
+## Training and persistence
+
+The first run trains and saves the selected models. Later runs reuse them; **Retrain selected models** forces a refresh. Old bundles require one fresh training pass after the schema update. Local artifacts survive server restarts on persistent disk. Optional Neon storage supports hosted deployments: install `requirements-neon.txt` and configure `MODEL_DATABASE_URL` in environment variables or Streamlit secrets. See README.md for setup and modeling limitations.

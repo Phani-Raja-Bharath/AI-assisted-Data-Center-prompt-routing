@@ -8,16 +8,8 @@ from typing import Any, Dict
 
 import numpy as np
 import joblib
-
-
-# Keep PUE values consistent with your main app (Alkrush et al., 2024)
-COOLING_SYSTEMS: Dict[str, Dict[str, Any]] = {
-    "mechanical_chiller": {"pue": 1.80},
-    "evaporative": {"pue": 1.35},
-    "air_economizer": {"pue": 1.25},
-    "liquid_cooling": {"pue": 1.15},
-    "free_air": {"pue": 1.10},
-}
+from energy_model import COOLING_TYPES, FEATURE_NAMES, surrogate_energy_target
+from model_store import SCHEMA_VERSION, validate_bundle
 
 
 def _load_bundle(bundle_path: Path) -> Dict[str, Any]:
@@ -27,6 +19,12 @@ def _load_bundle(bundle_path: Path) -> Dict[str, Any]:
             f"Run the Streamlit app once to train + save models."
         )
     bundle = joblib.load(bundle_path)
+    config = bundle.get("training_config", {})
+    if (config.get("schema_version") != SCHEMA_VERSION
+            or config.get("features") != list(FEATURE_NAMES)
+            or config.get("cooling_types") != list(COOLING_TYPES)):
+        raise ValueError("Legacy/incompatible bundle. Run the dashboard once to train the current schema.")
+    validate_bundle(bundle, config)
 
     # Basic sanity checks
     for key in ("models", "scalers", "best_model_name"):
@@ -47,41 +45,35 @@ def _load_bundle(bundle_path: Path) -> Dict[str, Any]:
 
 
 def benchmark_inference(bundle: Dict[str, Any], n_samples: int = 10_000, seed: int = 42) -> Dict[str, Any]:
-    """Return timing dict similar to AIModelSuite.benchmark_inference()."""
+    """Compare formula energy evaluation with end-to-end batch model inference.
 
-    np.random.seed(seed)
+    The baseline is a Python loop; this is not a vectorized physics benchmark.
+    """
+
+    if n_samples <= 0:
+        raise ValueError("n_samples must be positive.")
+    rng = np.random.default_rng(seed)
 
     # Generate test samples (same ranges as your Streamlit benchmark)
-    test_temps = np.random.uniform(5, 40, n_samples)
-    test_humidity = np.random.uniform(30, 90, n_samples)
-    test_wind = np.random.uniform(0, 15, n_samples)
-    test_cooling = np.random.randint(0, len(COOLING_SYSTEMS), n_samples)
+    test_temps = rng.uniform(5, 40, n_samples)
+    test_humidity = rng.uniform(30, 90, n_samples)
+    test_wind = rng.uniform(0, 15, n_samples)
+    test_pressure = rng.uniform(980, 1040, n_samples)
+    test_solar = rng.uniform(0, 1000, n_samples)
+    test_cooling = rng.integers(0, len(COOLING_TYPES), n_samples)
 
-    X_test = np.column_stack([test_temps, test_humidity, test_wind, test_cooling])
+    X_test = np.column_stack([test_temps, test_humidity, test_wind,
+                              test_pressure, test_solar, test_cooling])
 
     scaler_main = bundle["scalers"]["main"]
-    X_test_scaled = scaler_main.transform(X_test)
 
     # 1) Baseline physics formulas (loop, like your app)
     t0 = time.perf_counter()
-    cooling_types = list(COOLING_SYSTEMS.keys())
-    Ebase = 0.3  # Wh
-    alpha = 0.015
-    alpha_temp = 0.0012
-    beta = 0.15
-
     baseline_results = []
     for i in range(n_samples):
-        pue = COOLING_SYSTEMS[cooling_types[test_cooling[i]]]["pue"]
-        T = test_temps[i]
-        E = Ebase * pue * (1 + alpha * max(0.0, T - 20.0))
-
-        Q = E / 1000.0  # kWh
-        A = 1.0
-        W = test_wind[i]
-        delta_T = alpha_temp * (Q / A) * (1.0 / (1.0 + beta * W))
-
-        baseline_results.append((E, delta_T))
+        baseline_results.append(surrogate_energy_target(
+            test_temps[i], test_humidity[i], test_wind[i], test_pressure[i],
+            test_solar[i], COOLING_TYPES[test_cooling[i]]))
 
     baseline_time = time.perf_counter() - t0
 
@@ -90,10 +82,10 @@ def benchmark_inference(bundle: Dict[str, Any], n_samples: int = 10_000, seed: i
     model = bundle["models"][best_name]
 
     # small warm-up (helps stabilize first-call overhead)
-    _ = model.predict(X_test_scaled[:32])
+    _ = model.predict(scaler_main.transform(X_test[:32]))
 
     t1 = time.perf_counter()
-    _ = model.predict(X_test_scaled)
+    predictions = model.predict(scaler_main.transform(X_test))
     surrogate_time = time.perf_counter() - t1
 
     # Derived stats
@@ -116,6 +108,9 @@ def benchmark_inference(bundle: Dict[str, Any], n_samples: int = 10_000, seed: i
         "surrogate_throughput_per_sec": float(surrogate_throughput),
         "speedup_factor": float(speedup),
         "model_used": str(best_name),
+        "mae_against_formula_wh": float(np.mean(np.abs(predictions - baseline_results))),
+        "baseline_method": "Python loop: energy target only",
+        "surrogate_method": "Batch scaling and energy prediction",
     }
 
 

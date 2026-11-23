@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -24,12 +24,30 @@ import openmeteo_requests
 import requests_cache
 from retry_requests import retry
 from typing import Any
+from streamlit.errors import StreamlitSecretNotFoundError
+from energy_model import (BASE_ENERGY_WH, ENERGY_PER_PROMPT_BASE, COOLING_SYSTEMS,
+                          COOLING_TYPES, FEATURE_NAMES, cooling_index,
+                          calculate_energy_per_request, calculate_ΔT_contribution,
+                          surrogate_energy_target)
+from routing_core import allocate_requests, latency_request_capacity
+from model_store import (ModelStore, training_config, config_key, bundle_from_suite,
+                         restore_suite, get_or_train_bundle)
+from network_model import haversine_distance, calculate_latency
+from carbon_model import CARBON_INTENSITY_BASE, get_carbon_intensity, get_carbon_data
+from routing_strategies import (route_random, route_energy_only, route_heat_only,
+                                route_ΔT_aware, route_multi_objective)
+import inspect
+import energy_model
+from app_config import get_database_url
+from localization import tr, is_spanish, localized_dataframe, localized_figure, localized_formatter
+from provenance import provenance_rows, reference_markdown, executive_results_markdown, recommendation_markdown
 import warnings
 warnings.filterwarnings('ignore')
 
 # Configure logging for API call tracking
 logging.basicConfig(
     filename='datacenter_api_calls.log',
+    encoding='utf-8',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -121,250 +139,41 @@ def st_figure_downloads(fig, base_name, preset=None, width=None, height=None, sc
 
     png = _fig_to_image_bytes(fig, fmt="png", scale=sc, width=w, height=h)
     if png is None:
-        st.info("Figure export needs 'kaleido'. Install: pip install -U kaleido")
+        st.info(tr("Figure export needs 'kaleido'. Install: pip install -U kaleido"))
         return
 
-    st.download_button("⬇️ Download PNG (paper-ready)", png, file_name=f"{base_name}.png", mime="image/png")
+    st.download_button(tr('⬇️ Download PNG (paper-ready)'), png, file_name=f'{base_name}.png', mime='image/png')
 
     pdf = _fig_to_image_bytes(fig, fmt="pdf", scale=1, width=w, height=h)
     if pdf is not None:
-        st.download_button("⬇️ Download PDF (vector)", pdf, file_name=f"{base_name}.pdf", mime="application/pdf")
+        st.download_button(tr('⬇️ Download PDF (vector)'), pdf, file_name=f'{base_name}.pdf', mime='application/pdf')
 
 # ============================================================================
 # PAGE CONFIGURATION
 # ============================================================================
 
 st.set_page_config(
-    page_title="CLIMATE-AWARE SURROGATE MODELING FOR ENERGY-EFFICIENT DATA CENTER WORKLOAD ROUTING",
+    page_title="AI-Assisted Datacenter Prompt Routing for ΔT-AR Mitigation",
     page_icon="🌡️",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
-st.markdown("""
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Source+Serif+4:wght@600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-""", unsafe_allow_html=True)
 
 # ============================================================================
 # CSS STYLING
 # ============================================================================
 
-st.markdown("""
-<style>
-/* ---------- Design tokens ---------- */
-:root{
-  --bg: #ffffff;
-  --panel: #ffffff;
-  --text: #0f172a;
-  --muted: #475569;
-  --border: #e2e8f0;
-  --soft: #f8fafc;
-  --primary: #e94560;
-  --primary2: #c41e3a;
-  --shadow: 0 1px 10px rgba(15, 23, 42, 0.06);
-  --radius: 14px;
-}
-
-/* ---------- App background + typography ---------- */
-html, body, [data-testid="stAppViewContainer"] {
-  background: var(--bg) !important;
-  color: var(--text) !important;
-  font-family: "Source Sans 3", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif !important;
-}
-
-[data-testid="stHeader"], [data-testid="stToolbar"]{
-  background: var(--bg) !important;
-}
-
-.main .block-container{
-  max-width: 1400px;
-  padding-top: 1.25rem;
-  padding-bottom: 2rem;
-}
-
-/* ---------- Headings ---------- */
-.section-header{
-  font-family: "Source Serif 4", Georgia, serif;
-  font-size: 1.55rem;
-  font-weight: 700;
-  color: var(--text);
-  margin: 1.8rem 0 1rem 0;
-  padding: 0.85rem 1rem;
-  background: var(--soft);
-  border: 1px solid var(--border);
-  border-left: 5px solid var(--primary);
-  border-radius: 12px;
-}
-
-.subsection-header{
-  font-size: 1.05rem;
-  font-weight: 700;
-  color: var(--text);
-  margin: 1.25rem 0 0.75rem 0;
-  padding-bottom: 0.4rem;
-  border-bottom: 1px solid var(--border);
-}
-
-/* ---------- Cards / callouts ---------- */
-.metric-card, .finding-card, .dc-card, .reference-box{
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-
-.metric-card{
-  padding: 1.1rem;
-  text-align: center;
-}
-
-.metric-value{
-  font-family: "Source Serif 4", Georgia, serif;
-  font-size: 1.8rem;
-  font-weight: 700;
-  color: var(--text);
-}
-
-.metric-label{
-  font-size: 0.9rem;
-  color: var(--muted);
-  margin-top: 0.25rem;
-}
-
-.finding-card{ padding: 1.25rem; margin: 1rem 0; }
-.dc-card{ padding: 1rem; margin: 0.6rem 0; }
-
-.dc-card.hot{ border-left: 5px solid #dc2626; }
-.dc-card.moderate{ border-left: 5px solid #d97706; }
-.dc-card.cold{ border-left: 5px solid #2563eb; }
-
-.physics-callout, .info-box, .warning-box, .success-box{
-  border-radius: var(--radius);
-  padding: 1rem 1.1rem;
-  margin: 1rem 0;
-  border: 1px solid var(--border);
-  background: var(--soft);
-}
-
-.physics-callout{ border-left: 5px solid var(--primary); }
-.info-box{ border-left: 5px solid #0ea5e9; }
-.warning-box{ border-left: 5px solid #f59e0b; }
-.success-box{ border-left: 5px solid #22c55e; }
-
-/* ---------- Code pills ---------- */
-.code-text{
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  background: #f1f5f9;
-  padding: 0.18rem 0.45rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  font-size: 0.9rem;
-}
-
-/* ---------- Buttons (Streamlit changed selectors over versions) ---------- */
-/* Primary */
-button[data-testid="baseButton-primary"]{
-  background: linear-gradient(135deg, var(--primary) 0%, var(--primary2) 100%) !important;
-  color: #fff !important;
-  border: 0 !important;
-  border-radius: 12px !important;
-  font-weight: 700 !important;
-  padding: 0.7rem 1.2rem !important;
-  box-shadow: 0 6px 18px rgba(233, 69, 96, 0.18) !important;
-}
-button[data-testid="baseButton-primary"]:hover{
-  transform: translateY(-1px);
-  filter: brightness(1.02);
-}
-
-/* Secondary */
-button[data-testid="baseButton-secondary"]{
-  background: #ffffff !important;
-  color: var(--text) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 12px !important;
-  font-weight: 700 !important;
-  padding: 0.7rem 1.2rem !important;
-}
-
-/* ---------- Inputs ---------- */
-[data-baseweb="select"] > div,
-.stTextInput input,
-.stNumberInput input{
-  border-radius: 12px !important;
-}
-
-/* Hide Streamlit chrome */
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-</style>
-""", unsafe_allow_html=True)
 
 # ============================================================================
 # CONSTANTS - Research-Backed Values
 # ============================================================================
 
 # Base energy per AI prompt (Stern, 2025 - WSJ)
-BASE_ENERGY_WH = 0.3
-
-ENERGY_PER_PROMPT_BASE = BASE_ENERGY_WH
-
 api_fire_count = 0
 
-# Cooling Systems with PUE values from Alkrush et al. (2024)
-# International Journal of Refrigeration, 160, 246-262
-COOLING_SYSTEMS = {
-    "mechanical_chiller": {
-        "name": "Mechanical Chiller (CRAC)",
-        "pue": 1.80,
-        "efficiency": 0.60,
-        "temp_sensitivity": 0.020,
-        "description": "Traditional computer room air conditioner",
-        "best_climate": "any",
-        "icon": "🏭"
-    },
-    "evaporative": {
-        "name": "Evaporative Cooling",
-        "pue": 1.35,
-        "efficiency": 0.78,
-        "temp_sensitivity": 0.012,
-        "description": "Adiabatic cooling using water evaporation",
-        "best_climate": "hot_dry",
-        "icon": "💨"
-    },
-    "air_economizer": {
-        "name": "Air-Side Economizer",
-        "pue": 1.25,
-        "efficiency": 0.85,
-        "temp_sensitivity": 0.010,
-        "description": "Uses outside air when temperature permits",
-        "best_climate": "moderate",
-        "icon": "🌬️"
-    },
-    "liquid_cooling": {
-        "name": "Liquid Cooling",
-        "pue": 1.15,
-        "efficiency": 0.92,
-        "temp_sensitivity": 0.005,
-        "description": "Direct liquid cooling with cold plates",
-        "best_climate": "any",
-        "icon": "💧"
-    },
-    "free_air": {
-        "name": "Free Air Cooling",
-        "pue": 1.10,
-        "efficiency": 0.95,
-        "temp_sensitivity": 0.003,
-        "description": "Direct outside air, minimal mechanical cooling",
-        "best_climate": "cold",
-        "icon": "❄️"
-    }
-}
-
 # Default Datacenters
-DEFAULT_DATACENTERS = {
+DEFAULT_DATACENTERS: dict[str, dict[str, Any]] = {
     "Phoenix, AZ": {
         "lat": 33.4484, "lon": -112.0740,
         "country": "USA", "region": "arizona",
@@ -392,7 +201,8 @@ DEFAULT_DATACENTERS = {
 }
 
 # Extended DC locations for suggestions
-EXTENDED_DC_LOCATIONS = {
+EXTENDED_DC_LOCATIONS: dict[str, dict[str, Any]] = {
+    "Neuquén, Argentina": {"lat": -38.9500, "lon": -68.0670, "country": "Argentina", "region": "argentina", "climate": "moderate"},
     "Dublin, Ireland": {"lat": 53.3498, "lon": -6.2603, "region": "ireland", "climate": "cold"},
     "London, UK": {"lat": 51.5074, "lon": -0.1278, "region": "uk", "climate": "moderate"},
     "Frankfurt, Germany": {"lat": 50.1109, "lon": 8.6821, "region": "germany", "climate": "moderate"},
@@ -428,44 +238,9 @@ EXTENDED_DC_LOCATIONS = {
 # - Includes transmission losses where applicable
 # ============================================================================
 
-CARBON_INTENSITY_BASE = {
-    # United States - EPA eGRID 2023 / EIA State Profiles
-    "california": 0.20,    # CAISO 2024: ~200 gCO2/kWh, high solar penetration
-    "arizona": 0.42,       # EIA 2023: fossil heavy, some solar growth
-    "texas": 0.38,         # ERCOT 2024: wind growth, still gas-heavy
-    "washington": 0.08,    # EIA 2023: ~95% hydro dominated
-    "illinois": 0.32,      # EIA 2023: nuclear (~50%) + fossil
-    "florida": 0.42,       # EIA 2023: natural gas heavy
-    "colorado": 0.50,      # EIA 2023: coal transition ongoing
-    
-    # Nordic - Ember/EEA 2024
-    "sweden": 0.03,        # Ember 2024: 18-31 gCO2/kWh, hydro + nuclear
-    "norway": 0.02,        # IEA 2024: ~98% hydro
-    "finland": 0.08,       # EEA 2024: nuclear + hydro + wind
-    "iceland": 0.01,       # IEA 2024: geothermal + hydro (near zero)
-    
-    # Europe - EEA 2024
-    "ireland": 0.28,       # EEA 2024: wind growth, still gas backup
-    "uk": 0.23,            # EEA 2024: offshore wind growth
-    "germany": 0.35,       # EEA 2024: coal phase-out, renewables growing
-    "netherlands": 0.36,   # EEA 2024: gas + offshore wind
-    
-    # Asia-Pacific - IEA 2024
-    "japan": 0.45,         # IEA 2024: post-Fukushima LNG heavy
-    "australia": 0.62,     # IEA 2024: coal heavy, solar growing
-    "india": 0.70,         # IEA 2024: coal dominated
-    "singapore": 0.40,     # IEA 2024: natural gas (imported LNG)
-    
-    # Americas - IEA 2024
-    "brazil": 0.08,        # IEA 2024: ~80% hydro
-    "canada": 0.12,        # IEA 2024: hydro heavy (varies by province)
-    
-    # Default
-    "default": 0.40        # IEA 2024: global average ~400 gCO2/kWh
-}
-
 # City database for user location search
 CITY_DATABASE = {
+    "Neuquén": (-38.9500, -68.0670),
     "Orlando": (28.5383, -81.3792),
     "New York": (40.7128, -74.0060),
     "Los Angeles": (34.0522, -118.2437),
@@ -510,14 +285,14 @@ def create_pdf_report(results, final_rec):
 
     class PDF(FPDF):
         def header(self):
-            self.set_font('Arial', 'B', 15)
-            self.cell(0, 10, 'AI-Assisted Datacenter Routing Report', 0, 1, 'C')
+            self.set_font('Helvetica', 'B', 15)
+            self.cell(0, 10, 'AI-Assisted Datacenter Routing Report', border=0, align='C', new_x="LMARGIN", new_y="NEXT")
             self.ln(5)
 
         def footer(self):
             self.set_y(-15)
-            self.set_font('Arial', 'I', 8)
-            self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+            self.set_font('Helvetica', 'I', 8)
+            self.cell(0, 10, f'Page {self.page_no()}', border=0, align='C', new_x="RIGHT", new_y="TOP")
 
     pdf = PDF()
     pdf.add_page()
@@ -529,14 +304,14 @@ def create_pdf_report(results, final_rec):
         return text.encode("latin-1", errors="replace").decode("latin-1")
     
     # Title Info
-    pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, pdf_safe_text(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), 0, 1, 'C')
+    pdf.set_font("Helvetica", size=12)
+    pdf.cell(0, 10, pdf_safe_text(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"), border=0, align='C', new_x="LMARGIN", new_y="NEXT")
     pdf.ln(10)
 
     # Executive Summary
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "1. Executive Summary", 0, 1)
-    pdf.set_font("Arial", size=11)
+    pdf.set_font("Helvetica", 'B', 14)
+    pdf.cell(0, 10, '1. Executive Summary', border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=11)
     
     summary_text = (
         f"Recommended Strategy: {final_rec['recommended_strategy']}\n\n"
@@ -547,17 +322,17 @@ def create_pdf_report(results, final_rec):
     pdf.ln(10)
 
     # Metrics Comparison
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "2. Metrics Comparison", 0, 1)
-    pdf.set_font("Arial", size=10)
+    pdf.set_font("Helvetica", 'B', 14)
+    pdf.cell(0, 10, '2. Metrics Comparison', border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=10)
     
     # Table Header
     pdf.set_fill_color(200, 220, 255)
-    pdf.cell(40, 10, "Strategy", 1, 0, 'C', True)
-    pdf.cell(35, 10, "Energy (Wh)", 1, 0, 'C', True)
-    pdf.cell(35, 10, "Carbon (g)", 1, 0, 'C', True)
-    pdf.cell(35, 10, "Latency (ms)", 1, 0, 'C', True)
-    pdf.cell(35, 10, "Peak Delta-T AR (C)", 1, 1, 'C', True)
+    pdf.cell(40, 10, 'Strategy', border=1, align='C', fill=True, new_x="RIGHT", new_y="TOP")
+    pdf.cell(35, 10, 'Energy (Wh)', border=1, align='C', fill=True, new_x="RIGHT", new_y="TOP")
+    pdf.cell(35, 10, 'Carbon (g)', border=1, align='C', fill=True, new_x="RIGHT", new_y="TOP")
+    pdf.cell(35, 10, 'Latency (ms)', border=1, align='C', fill=True, new_x="RIGHT", new_y="TOP")
+    pdf.cell(35, 10, 'Peak Delta-T AR (C)', border=1, align='C', fill=True, new_x="LMARGIN", new_y="NEXT")
     
     # Table Rows
     for strategy, data in results.items():
@@ -566,14 +341,14 @@ def create_pdf_report(results, final_rec):
         pdf.cell(35, 10, f"{totals['energy_wh']:.1f}", 1)
         pdf.cell(35, 10, f"{totals['carbon_g']:.1f}", 1)
         pdf.cell(35, 10, f"{totals['avg_latency_ms']:.1f}", 1)
-        pdf.cell(35, 10, f"{totals['peak_ΔT']:.4f}", 1, 1)
+        pdf.cell(35, 10, f"{totals['peak_ΔT']:.4f}", border=1, new_x="LMARGIN", new_y="NEXT")
     
     pdf.ln(10)
     
     # Conclusion
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "3. Conclusion", 0, 1)
-    pdf.set_font("Arial", size=11)
+    pdf.set_font("Helvetica", 'B', 14)
+    pdf.cell(0, 10, '3. Conclusion', border=0, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=11)
     conclusion_text = (
         f"The {final_rec['recommended_strategy']} routing strategy is recommended based on "
         f"the analysis. This approach balances energy efficiency, latency, carbon emissions, "
@@ -581,53 +356,15 @@ def create_pdf_report(results, final_rec):
     )
     pdf.multi_cell(0, 7, pdf_safe_text(conclusion_text))
 
-    pdf_output = pdf.output(dest='S')
+    pdf_output = pdf.output()
     if isinstance(pdf_output, str):
         pdf_output = pdf_output.encode("latin-1", errors="replace")
-    return pdf_output
-
-def haversine_distance(lat1, lon1, lat2, lon2):
-    """
-    Calculate the great-circle distance between two points on Earth.
-    Returns distance in kilometers.
-    """
-    R = 6371  # Earth's radius in km
-    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
-    return 2 * R * np.arcsin(np.sqrt(a))
+    return bytes(pdf_output)
 
 
-def calculate_latency(distance_km, load_fraction=0.5, service_rate=1000, processing_ms=30,
-                      fiber_speed_km_s=200000, max_queue_ms=200, utilization_cap=0.99):
-    """
-    Latency proxy = propagation + M/M/1 queueing + processing.
 
-    - Propagation: round-trip distance / fiber speed
-    - Queueing: M/M/1 with utilization ρ = λ/μ, bounded for stability
-    - Processing: constant baseline
-    """
-    # --- Propagation delay (round trip) ---
-    propagation_ms = (float(distance_km) / float(fiber_speed_km_s)) * 1000.0 * 2.0
 
-    # --- Queueing delay (M/M/1) ---
-    # Interpret load_fraction as utilization proxy ρ, then map to λ = ρ * μ
-    rho = max(0.0, min(float(load_fraction), utilization_cap))  # 0 <= ρ < 1
-    mu = float(service_rate)                                   # requests/s
-    lam = rho * mu                                             # requests/s
 
-    # If extremely close to saturation, cap delay at max_queue_ms
-    if lam >= utilization_cap * mu:
-        queueing_ms = float(max_queue_ms)
-    else:
-        # M/M/1 mean waiting time in queue: Wq = λ / (μ(μ-λ)) seconds
-        # Convert to ms, then cap
-        wq_s = lam / (mu * max(1e-9, (mu - lam)))
-        queueing_ms = min(float(max_queue_ms), wq_s * 1000.0)
-
-    # --- Processing delay ---
-    return propagation_ms + queueing_ms + float(processing_ms)
 
 
 
@@ -644,7 +381,7 @@ import requests
 import requests_cache
 from typing import Any, cast
 
-def fetch_weather_data(lat: float, lon: float, location_name: str = "Location", climate_hint: str | None = None) -> dict[str, Any]:
+def fetch_weather_data(lat: float, lon: float, location_name: str = "Location", climate_hint: str | None = None, *, force_refresh: bool = False) -> dict[str, Any]:
     global api_fire_count
 
     lat = float(lat)
@@ -657,11 +394,11 @@ def fetch_weather_data(lat: float, lon: float, location_name: str = "Location", 
             f"API call #{api_fire_count} - Fetching weather for {location_name} at ({lat:.4f}, {lon:.4f})"
         )
 
-        cache_session = requests_cache.CachedSession(".cache", expire_after=1800)
+        cache_session = requests.Session() if force_refresh else requests_cache.CachedSession(".cache", expire_after=300)
         retry_session = retry(cache_session, retries=3, backoff_factor=0.2)
 
         # openmeteo_requests.Client type stubs expect niquests.Session
-        session = cast(requests.Session, retry_session)
+        session = cast(Any, retry_session)
         openmeteo = openmeteo_requests.Client(session=session)  # type: ignore[arg-type]
 
         params: dict[str, Any] = {
@@ -675,15 +412,21 @@ def fetch_weather_data(lat: float, lon: float, location_name: str = "Location", 
                 "shortwave_radiation",
             ],
             "timezone": "auto",
+            "wind_speed_unit": "ms",
         }
 
         responses = openmeteo.weather_api("https://api.open-meteo.com/v1/forecast", params=params)
         response = responses[0]
         current = response.Current()
+        if current is None:
+            raise ValueError("The weather API returned no current conditions.")
 
         def _safe_current_value(current_data, idx: int, default: float) -> float:
             var = current_data.Variables(idx) if current_data else None
-            return float(var.Value()) if var else float(default)
+            if var is None or not np.isfinite(var.Value()):
+                # Never label a default value as an API-sourced estimate.
+                raise ValueError(f"The weather API omitted current variable {idx}.")
+            return float(var.Value())
 
         return {
             "temperature": _safe_current_value(current, 0, 20.0),
@@ -691,7 +434,11 @@ def fetch_weather_data(lat: float, lon: float, location_name: str = "Location", 
             "wind_speed": _safe_current_value(current, 2, 5.0),
             "pressure": _safe_current_value(current, 3, 1013.25),
             "solar_radiation": _safe_current_value(current, 4, 200.0),
-            "source": "Open-Meteo API (Live)",
+            "source": "Current weather estimate (Open-Meteo API)",
+            "observed_at": datetime.fromtimestamp(current.Time(), tz=timezone.utc).isoformat() if current else None,
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "source_url": "https://open-meteo.com/en/docs",
+            "classification": "API-fetched model estimate",
             "success": True,
         }
 
@@ -711,7 +458,11 @@ def fetch_weather_data(lat: float, lon: float, location_name: str = "Location", 
     return {
         **base,
         "source": f"Estimated baseline ({climate_key}, API unavailable)",
+        "observed_at": None,
+        "source_url": None,
+        "classification": "Assumed climate baseline",
         "success": False,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
 def classify_climate(temperature, humidity, wind_speed=None):
@@ -792,14 +543,14 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
     # Setup Open-Meteo API client with cache and retry on error
     cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
     retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
-    openmeteo = openmeteo_requests.Client(session = retry_session)  # type: ignore
+    openmeteo = openmeteo_requests.Client(session = cast(Any, retry_session))
 
     all_records = []
 
     start_date = f"{start_year}-01-01"
     end_date = f"{end_year}-12-31"
 
-    print(f"📥 Fetching hourly historical weather from {start_date} to {end_date}")
+    logging.info(f"📥 Fetching hourly historical weather from {start_date} to {end_date}")
 
     # Combine datacenters
     datacenters = {}
@@ -814,7 +565,7 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
         lon = dc_info.get("lon", dc_info.get("longitude"))
 
         if lat is None or lon is None:
-            print(f"⚠️ Skipping {dc_name}: Missing coordinates")
+            logging.info(f"⚠️ Skipping {dc_name}: Missing coordinates")
             continue
 
         url = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -824,7 +575,8 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
             "start_date": start_date,
             "end_date": end_date,
             "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,surface_pressure,shortwave_radiation",
-            "timezone": "auto"
+            "timezone": "auto",
+            "wind_speed_unit": "ms"
         }
 
         try:
@@ -835,7 +587,7 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
             
             # Check if hourly data is available
             if hourly is None:
-                print(f"  ✗ {dc_name}: No hourly data returned")
+                logging.info(f"  ✗ {dc_name}: No hourly data returned")
                 continue
 
             # Process hourly data (order matches API request)
@@ -846,7 +598,7 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
             solar_var = hourly.Variables(4)
             
             if temp_var is None or humidity_var is None or wind_var is None:
-                print(f"  ✗ {dc_name}: Missing expected hourly variables")
+                logging.info(f"  ✗ {dc_name}: Missing expected hourly variables")
                 continue
             
             temp = temp_var.ValuesAsNumpy()
@@ -863,7 +615,7 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
             )
 
             n = len(temp)
-            print(f"  ✔ {dc_name}: {n} hourly rows")
+            logging.info(f"  ✔ {dc_name}: {n} hourly rows")
 
             for i in range(n):
                 # Classify climate for each hour
@@ -882,7 +634,7 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
                 ])
 
         except Exception as e:
-            print(f"❌ Error fetching {dc_name}: {e}")
+            logging.info(f"❌ Error fetching {dc_name}: {e}")
 
     df = pd.DataFrame(all_records, columns=[
         "location",
@@ -895,97 +647,17 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
         "cooling_type"
     ])
 
-    print(f"\n✅ Finished! Total samples collected: {len(df):,}")
+    logging.info(f"\n✅ Finished! Total samples collected: {len(df):,}")
     return df
 
     
-def get_carbon_intensity(region, hour=None):
-    """
-    Get carbon intensity for a region with time-of-day variation.
-    Based on research from CAISO, Swedish Energy Agency, EIA.
-    
-    Time variation reflects:
-    - Solar generation (low carbon midday in CA)
-    - Demand peaks (high carbon afternoon in hot regions)
-    - Wind patterns (variable)
-    """
-    if hour is None:
-        hour = datetime.now().hour
-    
-    base = CARBON_INTENSITY_BASE.get(region, CARBON_INTENSITY_BASE['default'])
-    
-    # Time-of-day variation based on region characteristics
-    if region in ['california', 'arizona', 'texas']:
-        # Solar states: lower carbon midday (10am-4pm), higher evening
-        if 10 <= hour <= 16:
-            variation = -0.08  # Solar generation reduces carbon
-        elif 17 <= hour <= 21:
-            variation = 0.10   # Evening peak, less solar
-        else:
-            variation = 0.02   # Night baseline
-    elif region in ['sweden', 'norway', 'finland', 'iceland']:
-        # Nordic: very stable due to hydro/nuclear
-        variation = 0.005 * np.sin(np.pi * (hour - 18) / 12)
-    elif region in ['uk', 'ireland', 'germany', 'netherlands']:
-        # Europe: wind variation
-        variation = 0.05 * np.sin(np.pi * (hour - 6) / 12)
-    else:
-        # Default: slight evening peak
-        variation = 0.03 * np.sin(np.pi * (hour - 18) / 12)
-    
-    return max(0.01, base + variation)
 
 
-def calculate_energy_per_request(temperature, humidity, cooling_type, energy_multiplier=1.0):
-    # """
-    # Calculate energy consumption per AI request.
-    
-    # Formula: E = E_base × PUE × (1 + α × max(0, T - 20)) × humidity_factor
-    
-    # Based on:
-    # - Stern (2025): Base energy ~0.3 Wh per prompt
-    # - Alkrush et al. (2024): PUE values by cooling type
-    # """
-    cooling = COOLING_SYSTEMS.get(cooling_type, COOLING_SYSTEMS['mechanical_chiller'])
-    pue = cooling['pue']
-    temp_sensitivity = cooling['temp_sensitivity']
-    
-    # Temperature adjustment (energy increases with temp above 20°C)
-    temp_factor = 1 + temp_sensitivity * max(0, temperature - 20)
-    
-    # Humidity adjustment (affects evaporative cooling efficiency)
-    if cooling_type == 'evaporative' and humidity > 60:
-        humidity_factor = 1 + 0.005 * (humidity - 60)
-    else:
-        humidity_factor = 1 + 0.001 * abs(humidity - 50)
-    
-    # Calculate total energy
-    total_energy = BASE_ENERGY_WH * pue * temp_factor * humidity_factor * energy_multiplier
-    
-    return total_energy
 
 
-def calculate_ΔT_contribution(heat_kwh, area_km2=1.0, wind_speed=5.0):
-    # """
-    # Estimate local ΔT-AR contribution using physics-based heat flux model.
-    
-    # Formula: ΔT = κ × (Q/A) × (1/(1 + γ × wind))
-    
-    # This model is derived from thermodynamic principles:
-    # - Heat flux density (Q/A) drives local temperature rise
-    # - Wind provides convective heat dissipation
-    
-    # Parameters:
-    # - η = 0.0012: Heat-to-temperature coefficient (°C per kW/km²)
-    # - γ = 0.15: Wind dissipation factor
-    # """
-    eta = 0.0012  # Heat-to-temperature coefficient
-    gamma = 0.15     # Wind dissipation factor
-    
-    heat_flux = heat_kwh / area_km2
-    wind_factor = 1 / (1 + gamma * wind_speed)
-    
-    return eta * heat_flux * wind_factor
+
+
+
 
 
 def get_optimal_cooling_for_climate(climate_detail):
@@ -1019,7 +691,7 @@ def collect_training_data(days: int = 7) -> pd.DataFrame:  # kept for compatibil
 
     # 2) Extended datacenters
     if EXTENDED_DC_LOCATIONS:
-        with st.spinner(f"🌐 Loading {len(EXTENDED_DC_LOCATIONS)} extended datacenters..."):
+        with st.spinner(tr(f'🌐 Loading {len(EXTENDED_DC_LOCATIONS)} extended datacenters...')):
             for dc_name, loc in EXTENDED_DC_LOCATIONS.items():
                 w = fetch_weather_data(loc["lat"], loc["lon"], dc_name)
                 climate_info = classify_climate(w["temperature"], w["humidity"], w.get("wind_speed", 5.0))
@@ -1119,7 +791,7 @@ class AIModelSuite:
         self.scalers = {}
         self.metrics = {}
         self.timing = {}
-        self.feature_names = ['temperature', 'humidity', 'wind_speed', 'pressure', 'solar_radiation', 'cooling_type']
+        self.feature_names = list(FEATURE_NAMES)
         self.is_trained = False
         self.used_real_weather = False
         self.training_source = "unknown"   # "real" or "synthetic"
@@ -1138,7 +810,7 @@ class AIModelSuite:
            (uniform sampling + physics model).
         """
         data = []
-        cooling_types = sorted(COOLING_SYSTEMS.keys())
+        cooling_types = COOLING_TYPES
 
 # --- 1. Try real historical weather-based training data ---
         if use_real_weather:
@@ -1161,21 +833,7 @@ class AIModelSuite:
                             cooling_str = cooling_types[0]  # safe default
                         cooling_idx = cooling_types.index(cooling_str)
 
-                        # Ground-truth energy from physics model
-                        # Wind improves free cooling efficiency
-                        # Solar radiation adds thermal load
-                        # Line ~1153, BEFORE energy calculation
-
-                        # Pressure effect on cooling efficiency
-                        # Lower pressure → lower air density → worse convective cooling
-                        p0 = 1013.25  # Standard sea-level pressure (hPa)
-                        k_p = 0.8    # Sensitivity coefficient (2% penalty at ~50 hPa below normal)
-                        pressure_factor = (p0 / max(pressure, 1e-6)) ** 0.8
-                        pressure_factor = float(np.clip(pressure_factor, 0.7, 1.35))
-                        wind_cooling_factor = 1 / (1 + 0.05 * wind)  # 10 m/s → ~33% reduction
-                        solar_factor = 1 + 0.0001 * max(0, solar - 200)  # Extra load above 200 W/m²
-                        energy = calculate_energy_per_request(temp, humidity, cooling_str,
-                                                            energy_multiplier=wind_cooling_factor * solar_factor * pressure_factor)
+                        energy = surrogate_energy_target(temp, humidity, wind, pressure, solar, cooling_str)
                         energy += np.random.normal(0, 0.003)
 
                         # Calculate delta_t for complete training data
@@ -1195,12 +853,12 @@ class AIModelSuite:
                     self.training_source = "real"
                     self.training_samples = len(data)
 
-                    print(f"✅ Training on historical weather data (2021-2024): {len(data)} samples")
+                    logging.info(f"✅ Training on historical weather data (2021-2024): {len(data)} samples")
                 else:
-                    print("⚠️ collect_historical_training_data() returned empty – using synthetic data.")
+                    logging.info("⚠️ collect_historical_training_data() returned empty – using synthetic data.")
             except Exception as e:
-                print(f"❌ Historical weather training data error: {e}")
-                print("   Falling back to synthetic training data.")
+                logging.info(f"❌ Historical weather training data error: {e}")
+                logging.info("   Falling back to synthetic training data.")
 
         # --- 2. Fallback: synthetic physics-based data (original behavior) ---
         if not data:
@@ -1213,13 +871,7 @@ class AIModelSuite:
                 solar = np.random.uniform(0, 1000)  # W/m² (0 at night, ~1000 peak)
                 cooling_idx = np.random.randint(0, len(cooling_types))
                 cooling_str = cooling_types[cooling_idx]
-                p0 = 1013.25  # Standard sea-level pressure (hPa)
-                k_p = 0.8    # Sensitivity coefficient (2% penalty at ~50 hPa below normal)
-                pressure_factor = 1 + k_p * max(0, (p0 - pressure) / p0)
-                wind_cooling_factor = 1 / (1 + 0.05 * wind)
-                solar_factor = 1 + 0.0001 * max(0, solar - 200)
-                energy = calculate_energy_per_request(temp, humidity, cooling_str,
-                                      energy_multiplier=wind_cooling_factor * solar_factor * pressure_factor)
+                energy = surrogate_energy_target(temp, humidity, wind, pressure, solar, cooling_str)
                 energy += np.random.normal(0, 0.005)
                 heat_kwh = energy / 1000.0
                 delta_t = calculate_ΔT_contribution(heat_kwh, area_km2=1.0, wind_speed=wind)
@@ -1229,7 +881,7 @@ class AIModelSuite:
             self.used_real_weather = False
             self.training_source = "synthetic"
             self.training_samples = len(data)
-            print(f"✅ Training on synthetic physics-based data: {len(data)} samples")
+            logging.info(f"✅ Training on synthetic physics-based data: {len(data)} samples")
 
         df = pd.DataFrame(
             data,
@@ -1237,8 +889,7 @@ class AIModelSuite:
         )
         
         # Remove any NaN values to prevent training errors
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df.dropna(inplace=True)
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
         
         return df
 
@@ -1279,11 +930,11 @@ class AIModelSuite:
         self.scalers['main'] = scaler
 
         # Verify split sizes
-        print(f"✓ Train: {len(X_train)} ({len(X_train)/len(X)*100:.1f}%)")
-        print(f"✓ Val: {len(X_val)} ({len(X_val)/len(X)*100:.1f}%)")
-        print(f"✓ Test: {len(X_test)} ({len(X_test)/len(X)*100:.1f}%)")
+        logging.info(f"✓ Train: {len(X_train)} ({len(X_train)/len(X)*100:.1f}%)")
+        logging.info(f"✓ Val: {len(X_val)} ({len(X_val)/len(X)*100:.1f}%)")
+        logging.info(f"✓ Test: {len(X_test)} ({len(X_test)/len(X)*100:.1f}%)")
 
-        results = {}
+        results: dict[str, Any] = {}
 
         # ========== 1. MULTIPLE LINEAR REGRESSION ==========
         if train_selected in ['all', 'mlr']:
@@ -1305,7 +956,7 @@ class AIModelSuite:
                 'y_test': y_test,
                 'coefficients': dict(zip(self.feature_names, mlr.coef_))
             }
-            print(f"[MLR] R²: {results['MLR']['r2']:.4f}")
+            logging.info(f"[MLR] R²: {results['MLR']['r2']:.4f}")
 
         # ========== 2. ARTIFICIAL NEURAL NETWORK ==========
         if train_selected in ['all', 'ann']:
@@ -1337,7 +988,7 @@ class AIModelSuite:
                 'y_test': y_test,
                 'architecture': '64→32→16'
             }
-            print(f"[ANN] R²: {results['ANN']['r2']:.4f}")
+            logging.info(f"[ANN] R²: {results['ANN']['r2']:.4f}")
 
         # ========== 3. BAYESIAN OPTIMIZATION ==========
         if train_selected in ['all', 'bayesian'] and BAYES_AVAILABLE:
@@ -1412,11 +1063,11 @@ class AIModelSuite:
                     'y_test': y_test,
                     'best_params': best
                 }
-                print(f"[Bayesian] R²: {results['Bayesian']['r2']:.4f}")
-                print(f"[Bayesian] Best params: {best}")
+                logging.info(f"[Bayesian] R²: {results['Bayesian']['r2']:.4f}")
+                logging.info(f"[Bayesian] Best params: {best}")
                 
             except Exception as e:
-                print(f"[Bayesian] Error: {str(e)}")
+                logging.info(f"[Bayesian] Error: {str(e)}")
                 results['Bayesian'] = {'error': str(e)}
 
         # Feature importance (using TEST set for evaluation, not training)
@@ -1426,7 +1077,7 @@ class AIModelSuite:
             results.setdefault("feature_importance", {})
             results["feature_importance"]["MLR"] = importances   # from MLR
 # ...
-            print(f"Feature importances (MLR): {importances}")        # Feature importance (using TEST set for evaluation, not training)
+            logging.info(f"Feature importances (MLR): {importances}")        # Feature importance (using TEST set for evaluation, not training)
         # Feature importance (using TEST set for evaluation, not training)
         if 'ANN' in self.models:
             try:
@@ -1439,9 +1090,9 @@ class AIModelSuite:
                     name: float(imp) for name, imp in 
                     zip(self.feature_names, perm_importance['importances_mean'])
                 }
-                results['feature_importance']["ANN"] = importance_dict
+                results.setdefault("feature_importance", {})["ANN"] = importance_dict
             except Exception as e:
-                print(f"[Feature Importance] Error: {str(e)}")
+                logging.info(f"[Feature Importance] Error: {str(e)}")
 
 # ========== COMPUTE TRAIN/VAL/TEST METRICS FOR ALL MODELS ==========
         for model_name in ['MLR', 'ANN', 'Bayesian']:  # ← Explicit list of models only
@@ -1498,14 +1149,14 @@ class AIModelSuite:
                     if hasattr(model, 'n_iter_'):
                         results[model_name]['n_iter'] = int(model.n_iter_)
                
-                print(f"[{model_name}] Train R²: {results[model_name]['train_r2']:.4f}, "
+                logging.info(f"[{model_name}] Train R²: {results[model_name]['train_r2']:.4f}, "
                       f"Val R²: {results[model_name]['val_r2']:.4f}, "
                       f"Test R²: {results[model_name]['r2']:.4f} - "
                       f"{results[model_name]['status']}")
 
         # ========== RETURN RESULTS ==========
         self.is_trained = True
-        # Select best model based on R² score
+        # Select by validation R²; reserve test scores for reporting.
         if results:
             # Filter out error results
             valid_results = {k: v for k, v in results.items() 
@@ -1514,7 +1165,7 @@ class AIModelSuite:
             if valid_results:
                 self.best_model_name = max(
                     valid_results.keys(), 
-                    key=lambda x: valid_results[x]['r2']
+                    key=lambda x: valid_results[x]['val_r2']
                 )
                 self.best_model = self.models[self.best_model_name]
 
@@ -1566,14 +1217,14 @@ class AIModelSuite:
         #             'val_r2': r2_score(y_val_dt, dt_val_pred),
         #             'val_mae': mean_absolute_error(y_val_dt, dt_val_pred),
         #         }
-        #         print(f"[ΔT Model] Test R²: {results['DT']['r2']:.4f}, MAE: {results['DT']['mae']:.6f}°C")
+        #         logging.info(f"[ΔT Model] Test R²: {results['DT']['r2']:.4f}, MAE: {results['DT']['mae']:.6f}°C")
                 
-        #         print(f"\n{'='*60}")
-        #         print(f"✓ SELECTED BEST MODEL: {self.best_model_name}")
-        #         print(f"  R² = {valid_results[self.best_model_name]['r2']:.4f}")
-        #         print(f"  MAE = {valid_results[self.best_model_name]['mae']:.4f} Wh")
-        #         print(f"  RMSE = {valid_results[self.best_model_name]['rmse']:.4f} Wh")
-        #         print(f"{'='*60}\n")
+        #         logging.info(f"\n{'='*60}")
+        #         logging.info(f"✓ SELECTED BEST MODEL: {self.best_model_name}")
+        #         logging.info(f"  R² = {valid_results[self.best_model_name]['r2']:.4f}")
+        #         logging.info(f"  MAE = {valid_results[self.best_model_name]['mae']:.4f} Wh")
+        #         logging.info(f"  RMSE = {valid_results[self.best_model_name]['rmse']:.4f} Wh")
+        #         logging.info(f"{'='*60}\n")
 
         # Store metrics for later access
         self.metrics = results
@@ -1596,7 +1247,7 @@ class AIModelSuite:
         X = np.array(features).reshape(1, -1)
         X_scaled = self.scalers['main'].transform(X)
 
-        return self.models[model_name].predict(X_scaled)[0]
+        return max(1e-6, float(self.models[model_name].predict(X_scaled)[0]))
     
     def predict_dt(self, features):
         raise NotImplementedError("ΔT model disabled. Use physics-based ΔT (calculate_ΔT_contribution).")
@@ -1614,7 +1265,7 @@ class AIModelSuite:
             if name in skip:
                 continue
             if isinstance(metrics, dict) and "r2" in metrics and "error" not in metrics:
-                if metrics["r2"] > best_r2:
+                if best_name is None or metrics.get("val_r2", metrics["r2"]) > self.metrics[best_name].get("val_r2", self.metrics[best_name]["r2"]):
                     best_r2 = metrics["r2"]
                     best_name = name
 
@@ -1623,406 +1274,6 @@ class AIModelSuite:
 # ============================================================================
 # ROUTING STRATEGIES
 # ============================================================================
-
-def route_random(datacenters, num_requests):
-    """
-    Random routing - baseline strategy.
-    Distributes requests uniformly (with slight randomization).
-    Does NOT consider energy, ΔT-AR, or latency – pure control case.
-    """
-    n_dcs = len(datacenters)
-    if n_dcs == 0:
-        return {}
-    
-    # Dirichlet distribution for slight variation
-    weights = np.random.dirichlet(np.ones(n_dcs))
-    distribution = {dc: int(w * num_requests) for dc, w in zip(datacenters.keys(), weights)}
-    
-    # Ensure total matches exactly
-    total = sum(distribution.values())
-    diff = num_requests - total
-    if diff != 0:
-        first_dc = next(iter(distribution))
-        distribution[first_dc] += diff
-    
-    return distribution
-
-
-def route_energy_only(datacenters, weather_data, cooling_selections,
-                      num_requests, ai_models=None, max_dc_capacity_mw=100):
-    """
-    Energy-only routing - demonstrates cooler location concentration problem.
-    Routes more traffic to datacenters with lowest energy cost.
-    Ignores latency SLO and ΔT-AR – intentionally unconstrained.
-    """
-    if not datacenters or num_requests <= 0:
-        return {}
-
-    energy_scores = {}
-
-    # 1) Compute energy per request at each DC
-    for dc_name, dc_info in datacenters.items():
-        weather = weather_data.get(dc_name, {}) or {}
-        cooling = cooling_selections.get(dc_name, dc_info.get('default_cooling', 'air_economizer'))
-
-        temp = weather.get('temperature', 20)
-        humidity = weather.get('humidity', 50)
-        wind = weather.get('wind_speed', 5)
-        pressure = weather.get('pressure', 1013.25)
-        solar = weather.get('solar_radiation', 200.0)
-
-        if ai_models is not None and getattr(ai_models, "is_trained", False):
-            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
-        else:
-            energy = calculate_energy_per_request(temp, humidity, cooling)
-
-        energy_scores[dc_name] = float(energy)
-
-    if not energy_scores:
-        return {}
-
-    # 2) Inverse weighting (lower energy => higher weight)
-    min_energy = min(energy_scores.values())
-    weights = {dc: (min_energy / max(e, 1e-3)) ** 3 for dc, e in energy_scores.items()}
-    total_weight = sum(weights.values())
-
-    # Guard against pathological totals
-    if total_weight <= 0 or not np.isfinite(total_weight):
-        weights = {dc: 1.0 for dc in energy_scores}
-        total_weight = float(len(weights))
-
-    # 3) Apply capacity limits
-    distribution = {}
-    remaining = int(num_requests)
-
-    for dc, w in weights.items():
-        base_requests = int((w / total_weight) * num_requests)
-        capped = apply_capacity_limit(base_requests, energy_scores[dc], max_dc_capacity_mw)
-        distribution[dc] = capped
-        remaining -= capped
-
-    # 4) Give remainder to best DC (still safe)
-    if remaining > 0 and energy_scores:
-        best_dc = min(energy_scores, key=lambda d: energy_scores[d])
-        distribution[best_dc] = distribution.get(best_dc, 0) + remaining
-
-    return distribution
-
-
-def route_heat_only(datacenters, weather_data, cooling_selections,
-                    num_requests, ai_models=None, max_dc_capacity_mw=500):
-    """
-    Heat-Only routing:
-    Allocate more requests to datacenters with lower predicted ΔT (or ΔT-AR proxy),
-    subject to capacity limits.
-    """
-    if not datacenters:
-        return {}
-
-    # 1) Compute ΔT score (lower is better) + energy (for capacity)
-    dt_scores = {}
-    energy_map = {}
-
-    for dc_name, dc_info in datacenters.items():
-        w = weather_data.get(dc_name, {}) or {}
-        cooling = cooling_selections.get(dc_name, dc_info.get("default_cooling", "air_economizer"))
-
-        temp = w.get("temperature", 20)
-        humidity = w.get("humidity", 50)
-        wind = w.get("wind_speed", 5)
-        pressure = w.get("pressure", 1013.25)
-        solar = w.get("solar_radiation", 200.0)
-
-        cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-
-        # Energy (for capacity + optional ΔT physics)
-        if ai_models is not None and getattr(ai_models, "is_trained", False):
-            energy = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
-        else:
-            energy = calculate_energy_per_request(temp, humidity, cooling)
-
-        energy_map[dc_name] = energy
-
-        # ΔT (prefer AI DT if available, otherwise physics-based)
-        dt = None
-        if ai_models is not None and getattr(ai_models, "is_trained", False) and "DT" in getattr(ai_models, "models", {}):
-            try:
-                dt = ai_models.predict_dt([temp, humidity, wind, pressure, solar, cooling_idx])
-            except Exception:
-                dt = None
-
-        if dt is None:
-            heat_kwh = energy / 1000.0
-            dt = calculate_ΔT_contribution(heat_kwh, area_km2=1.0, wind_speed=wind)
-
-        dt_scores[dc_name] = float(dt)
-
-    # 2) Convert score to weights: lower ΔT -> higher weight
-    if not dt_scores:
-        return {}
-    min_dt = min(dt_scores.values())
-    weights = {dc: (min_dt / max(dt, 1e-6)) ** 3 for dc, dt in dt_scores.items()}
-    total_w = sum(weights.values()) or 1.0  # Guard: use 1.0 if sum is zero
-
-    # 3) Allocate with capacity limits
-    distribution = {}
-    remaining = num_requests
-    for dc, w in weights.items():
-        base_requests = int((w / total_w) * num_requests)
-        capped = apply_capacity_limit(base_requests, energy_map[dc], max_dc_capacity_mw)
-        distribution[dc] = capped
-        remaining -= capped
-
-    # 4) Distribute remainder greedily to lowest ΔT
-    if remaining > 0:
-        ranked = sorted(dt_scores.items(), key=lambda x: x[1])  # lowest ΔT first
-        i = 0
-        while remaining > 0 and ranked:
-            dc = ranked[i % len(ranked)][0]
-            add_one = apply_capacity_limit(1, energy_map[dc], max_dc_capacity_mw)
-            if add_one <= 0:
-                i += 1
-                # avoid infinite loop if all are capped
-                if i > len(ranked) * 3:
-                    break
-                continue
-            distribution[dc] += add_one
-            remaining -= add_one
-            i += 1
-
-    return distribution
-
-def route_ΔT_aware(datacenters, weather_data, cooling_selections,
-                    num_requests, ai_models=None, max_dc_capacity_mw=100):
-    """
-    ΔT-AR routing - research contribution.
-    Penalizes datacenters with high thermal vulnerability.
-    Still does NOT enforce latency SLO – this is a ΔT-AR-focused baseline.
-    
-    Args:
-        max_dc_capacity_mw: Maximum power capacity per datacenter in MW
-    """
-    scores = {}
-    
-    if not datacenters or num_requests <= 0:
-        return {}
-
-    # 1. Compute ΔT-AR cost per DC
-    for dc_name, dc_info in datacenters.items():
-        weather = weather_data.get(dc_name, {})
-        cooling = cooling_selections.get(dc_name, dc_info.get('default_cooling', 'air_economizer'))
-        
-        temp = weather.get('temperature', 20)
-        humidity = weather.get('humidity', 50)
-        wind = weather.get('wind_speed', 5)
-        pressure = weather.get('pressure', 1013.25)
-        solar = weather.get('solar_radiation', 200.0)
-        
-        # Energy calculation
-        if ai_models is not None and ai_models.is_trained:
-            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
-        else:
-            energy = calculate_energy_per_request(temp, humidity, cooling)
-        
-        # ΔT-AR vulnerability: hotter sites are more problematic
-        ΔT_vulnerability = 1.0 + 0.05 * max(0.0, temp - 25.0)
-        
-        # Wind mitigation: more wind = better dispersion → lower effective score
-        wind_benefit = 1.0 / (1.0 + 0.05 * wind)
-        
-        # Combined cost (lower is better)
-        scores[dc_name] = energy * ΔT_vulnerability * wind_benefit
-    
-    # 2. Inverse weighting and capacity limiting
-    max_score = max(scores.values())
-    weights = {dc: max_score / max(s, 1e-6) for dc, s in scores.items()}
-    total_weight = sum(weights.values())
-    if total_weight <= 0 or not np.isfinite(total_weight):
-        # fall back to uniform
-        weights = {dc: 1.0 for dc in scores}
-        total_weight = float(len(weights))
-
-    
-    # Track energy for capacity calculation
-    energy_map = {}
-    for dc in datacenters:
-        weather = weather_data.get(dc, {})
-        cooling = cooling_selections.get(dc, datacenters[dc].get('default_cooling', 'air_economizer'))
-        temp = weather.get('temperature', 20)
-        humidity = weather.get('humidity', 50)
-        wind = weather.get('wind_speed', 5)
-        pressure = weather.get('pressure', 1013.25)
-        solar = weather.get('solar_radiation', 200.0)
-        if ai_models is not None and ai_models.is_trained:
-            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy_map[dc] = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
-        else:
-            energy_map[dc] = calculate_energy_per_request(temp, humidity, cooling)
-    
-    # Apply capacity limits
-    distribution = {}
-    remaining = num_requests
-    for dc, w in weights.items():
-        base_requests = int((w / total_weight) * num_requests)
-        capped = apply_capacity_limit(base_requests, energy_map[dc], max_dc_capacity_mw)
-        distribution[dc] = capped
-        remaining -= capped
-    
-    # Distribute any remaining to best (lowest cost) DC
-    if remaining > 0:
-        best_dc = min(scores, key=lambda dc: scores[dc])
-        distribution[best_dc] = distribution.get(best_dc, 0) + remaining
-    
-    return distribution
-
-
-def route_multi_objective(datacenters, weather_data, cooling_selections, user_location, 
-                          num_requests, ai_models=None, latency_threshold=100, max_dc_capacity_mw=100):
-    """
-    Multi-objective routing - balances Energy, Latency, Carbon, ΔT-AR.
-    This is the ONLY strategy that enforces a latency target (latency_threshold).
-    
-    Args:
-        datacenters: dict of DC metadata (lat, lon, region, etc.)
-        weather_data: per-DC weather snapshots
-        cooling_selections: chosen cooling tech per DC
-        user_location: (lat, lon) of the user
-        num_requests: total number of requests to route
-        ai_models: trained AIModelSuite (optional)
-        latency_threshold: target latency in ms (SLO)
-        max_dc_capacity_mw: Maximum power capacity per datacenter in MW
-    """
-    user_lat, user_lon = user_location
-    hour = datetime.now().hour
-    
-    scores = {}
-    
-    # 1. Compute multi-objective score per DC
-    for dc_name, dc_info in datacenters.items():
-        weather = weather_data.get(dc_name, {})
-        cooling = cooling_selections.get(dc_name, dc_info.get('default_cooling', 'air_economizer'))
-        
-        temp = weather.get('temperature', 20)
-        humidity = weather.get('humidity', 50)
-        wind = weather.get('wind_speed', 5)
-        pressure = weather.get('pressure', 1013.25)
-        solar = weather.get('solar_radiation', 200.0)
-        
-        # Energy (from AI or physics)
-        if ai_models is not None and ai_models.is_trained:
-            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
-        else:
-            energy = calculate_energy_per_request(temp, humidity, cooling)
-        energy_norm = energy / 1.0  # assume ~1 Wh upper reference
-        
-        # 2. Latency vs threshold
-        distance = haversine_distance(user_lat, user_lon, dc_info['lat'], dc_info['lon'])
-        latency = calculate_latency(distance, load_fraction=0.7)  # ms
-        
-        if latency_threshold is None or latency_threshold <= 0:
-            effective_thresh = 200.0  # fallback reference
-        else:
-            effective_thresh = float(latency_threshold)
-        
-        # Normalized latency: 1.0 at threshold, clipped at 2x
-        latency_norm = min(latency / effective_thresh, 2.0)
-        
-        # Hard cutoff: if latency is way too bad (>2× threshold), skip this DC
-        if latency > 2 * effective_thresh:
-            continue
-        
-        # 3. Carbon intensity (normalized)
-        region = dc_info.get('region', 'default')
-        carbon = get_carbon_intensity(region, hour)
-        carbon_norm = carbon / 0.7  # assume ~0.7 kgCO2/kWh as "worst" grid
-        
-        # 4. ΔT-AR vulnerability (wind-aware)
-        beta_ΔT = 0.15  # same idea as in calculate_ΔT_contribution
-        base_ΔT = max(0.0, temp - 15.0) / 30.0   # 0–1 depending on how hot
-        wind_factor = 1.0 / (1.0 + beta_ΔT * wind)  # more wind → less trapped heat
-        ΔT_score = base_ΔT * wind_factor
-        
-        # 5. Latency penalty when SLO is violated
-        if latency > effective_thresh:
-            latency_penalty = ((latency - effective_thresh) / effective_thresh) ** 2
-        else:
-            latency_penalty = 0.0
-        
-        # 6. Base multi-objective score
-        base_score = 0.25 * (energy_norm + latency_norm + carbon_norm + ΔT_score)
-        score = base_score + latency_penalty
-        
-        scores[dc_name] = {
-            "energy_norm": energy_norm,
-            "latency_norm": latency_norm,
-            "carbon_norm": carbon_norm,
-            "ΔT_score": ΔT_score,
-            "score": score,
-            "latency": latency,
-            "requests": 0,
-        }
-    
-    # If no DC satisfies the basic latency bound, fall back to uniform routing
-    if not scores:
-        n = len(datacenters)
-        if n == 0:
-            return {}
-        base_each = num_requests // n
-        distribution = {dc: base_each for dc in datacenters}
-        remainder = num_requests - base_each * n
-        first_dc = next(iter(datacenters))
-        distribution[first_dc] += remainder
-        return distribution
-    
-    # 2. Softmax-like weighting on scores
-    min_score = min(info["score"] for info in scores.values())
-    weights = {
-        dc: np.exp(-(info["score"] - min_score) * 3.0)
-        for dc, info in scores.items()
-    }
-    total_weight = sum(weights.values())
-    
-    if total_weight == 0:
-        # Numerical safety: fallback equal weighting
-        equal_w = 1.0 / len(weights)
-        weights = {dc: equal_w for dc in weights}
-        total_weight = 1.0
-    
-    # 3. Energy per DC (for capacity limits)
-    energy_map = {}
-    for dc in datacenters:
-        weather = weather_data.get(dc, {})
-        cooling = cooling_selections.get(dc, datacenters[dc].get('default_cooling', 'air_economizer'))
-        temp = weather.get('temperature', 20)
-        humidity = weather.get('humidity', 50)
-        wind = weather.get('wind_speed', 5)
-        pressure = weather.get('pressure', 1013.25)
-        solar = weather.get('solar_radiation', 200.0)
-        if ai_models is not None and ai_models.is_trained:
-            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
-            energy_map[dc] = ai_models.predict([temp, humidity, wind, pressure, solar, cooling_idx])
-        else:
-            energy_map[dc] = calculate_energy_per_request(temp, humidity, cooling)
-    
-    # 4. Apply capacity limits
-    distribution = {}
-    remaining = num_requests
-    for dc, w in weights.items():
-        base_requests = int((w / total_weight) * num_requests)
-        capped = apply_capacity_limit(base_requests, energy_map[dc], max_dc_capacity_mw)
-        distribution[dc] = capped
-        remaining -= capped
-    
-    # 5. Distribute remaining requests to the best (lowest score) DC
-    if remaining > 0:
-        best_dc = min(scores, key=lambda d: scores[d]["score"])
-        distribution[best_dc] = distribution.get(best_dc, 0) + remaining
-    
-    return distribution
-
 
 # ============================================================================
 # SIMULATION ENGINE
@@ -2041,20 +1292,22 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
     - Compute ΔT once (no duplicate fallback)
     - Make Wh/kWh conversions explicit and consistent
     """
+    if num_requests <= 0:
+        raise ValueError("Request volume must be positive.")
     user_lat, user_lon = user_location
     hour = datetime.now().hour
 
     strategies = {
-        'Random': route_random(datacenters, num_requests),
+        'Random': route_random(datacenters, num_requests, weather_data, cooling_selections, ai_models, max_dc_capacity_mw, energy_multiplier),
         'Energy-Only': route_energy_only(datacenters, weather_data, cooling_selections,
-                                         num_requests, ai_models, max_dc_capacity_mw),
+                                         num_requests, ai_models, max_dc_capacity_mw, energy_multiplier),
         'Heat-Only': route_heat_only(datacenters, weather_data, cooling_selections,
-                                     num_requests, ai_models, max_dc_capacity_mw),
+                                     num_requests, ai_models, max_dc_capacity_mw, energy_multiplier),
         'ΔT-AR': route_ΔT_aware(datacenters, weather_data, cooling_selections,
-                                num_requests, ai_models, max_dc_capacity_mw),
+                                num_requests, ai_models, max_dc_capacity_mw, energy_multiplier),
         'Multi-Objective': route_multi_objective(datacenters, weather_data, cooling_selections,
                                                  user_location, num_requests, ai_models,
-                                                 latency_threshold, max_dc_capacity_mw)
+                                                 latency_threshold, max_dc_capacity_mw, energy_multiplier)
     }
 
     results = {}
@@ -2065,6 +1318,7 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
             'datacenters': {}
         }
 
+        served_requests = sum(distribution.values())
         total_energy_wh = 0.0
         total_carbon_kg = 0.0
         weighted_latency_ms = 0.0
@@ -2088,7 +1342,7 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
             solar    = weather.get('solar_radiation', 200.0)
 
             # Cooling index (compute once)
-            cooling_idx = list(COOLING_SYSTEMS.keys()).index(cooling)
+            cooling_idx = cooling_index(cooling)
 
             # -------------------------
             # Energy per request (Wh/request)
@@ -2152,12 +1406,14 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
             # Accumulate strategy totals
             total_energy_wh += dc_energy_wh
             total_carbon_kg += dc_carbon_kg
-            weighted_latency_ms += dc_latency_ms * load_fraction
+            weighted_latency_ms += dc_latency_ms * requests / max(1, served_requests)
             total_heat_wh += dc_energy_wh
 
             heat_values.append(dc_energy_wh)
             ΔT_values.append(ΔT)
 
+        # Include idle sites so concentration across the selected fleet is represented.
+        heat_values.extend([0.0] * (len(datacenters) - len(heat_values)))
         # Concentration metric (CV)
         if len(heat_values) > 1 and np.mean(heat_values) > 0:
             heat_cv = float(np.std(heat_values) / np.mean(heat_values))
@@ -2168,6 +1424,10 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
         avg_ΔT  = float(np.mean(ΔT_values)) if ΔT_values else 0.0
 
         strategy_results['totals'] = {
+            'offered_requests': num_requests,
+            'served_requests': served_requests,
+            'unserved_requests': num_requests - served_requests,
+            'service_rate': served_requests / num_requests,
             'energy_wh': total_energy_wh,
             'carbon_kg': total_carbon_kg,
             'carbon_g': total_carbon_kg * 1000,
@@ -2185,7 +1445,8 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
 
 
 def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
-                    cooling_selections, energy_multiplier, ai_models, n_runs=100):
+                    cooling_selections, energy_multiplier, ai_models, n_runs=100,
+                    latency_threshold=100, max_dc_capacity_mw=100):
     """
     Run Monte Carlo simulation with stochastic weather variations.
     """
@@ -2205,12 +1466,13 @@ def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
             }
                 
         # Vary request volume
-        varied_requests = int(num_requests * (1 + np.random.uniform(-0.2, 0.2)))
+        varied_requests = max(1, int(num_requests * (1 + np.random.uniform(-0.2, 0.2))))
         
         # Run simulation
         results = run_simulation(
             datacenters, varied_weather, user_location,
-            varied_requests, cooling_selections, energy_multiplier, ai_models
+            varied_requests, cooling_selections, energy_multiplier, ai_models,
+            latency_threshold, max_dc_capacity_mw
         )
         
         for strategy, data in results.items():
@@ -3085,7 +2347,7 @@ def create_sensitivity_temperature_chart(sensitivity_data):
     return fig
 
 
-def create_carbon_intensity_curves():
+def create_carbon_intensity_curves(datacenters=None):
     """
     Create 24-hour carbon intensity curves.
     Graph #17 in the dashboard.
@@ -3097,6 +2359,8 @@ def create_carbon_intensity_curves():
         'San Francisco (California)': 'california', 
         'Stockholm (Sweden)': 'sweden'
     }
+    if datacenters:
+        regions = {name: info.get('region', 'default') for name, info in datacenters.items()}
     
     colors = {
         'Phoenix (Arizona)': '#dc2626',
@@ -3106,17 +2370,19 @@ def create_carbon_intensity_curves():
     
     fig = go.Figure()
     
-    for region_name, region_key in regions.items():
+    palette = px.colors.qualitative.Safe
+    for index, (region_name, region_key) in enumerate(regions.items()):
         values = [get_carbon_intensity(region_key, h) for h in hours]
+        color = colors.get(region_name, palette[index % len(palette)])
         
         fig.add_trace(go.Scatter(
             x=hours,
             y=values,
             mode='lines',
             name=region_name,
-            line=dict(color=colors[region_name], width=3),
+            line=dict(color=color, width=3),
             fill='tozeroy',
-            fillcolor=colors[region_name].replace(')', ', 0.1)').replace('rgb', 'rgba'),
+            fillcolor=color,
         ))
     
     # Add current hour marker
@@ -3458,7 +2724,13 @@ def generate_final_recommendation(results, latency_threshold):
     
     # Find best strategy for ΔT-AR reduction
     ΔT_scores = {s: results[s]['totals']['peak_ΔT'] for s in strategies}
-    best_ΔT = min(ΔT_scores, key=lambda s: ΔT_scores[s])
+    fully_served = [s for s in strategies if results[s]['totals'].get('unserved_requests', 0) == 0]
+    if fully_served:
+        candidates = fully_served
+    else:
+        maximum_served = max(results[s]['totals'].get('served_requests', 0) for s in strategies)
+        candidates = [s for s in strategies if results[s]['totals'].get('served_requests', 0) == maximum_served]
+    best_ΔT = min(candidates, key=lambda s: ΔT_scores[s])
     
     # Calculate improvements vs Energy-Only
     energy_only = results['Energy-Only']['totals']
@@ -3504,9 +2776,14 @@ def generate_final_recommendation(results, latency_threshold):
        
     # Generate dynamic reasoning
     reasoning = []
+    if best.get('unserved_requests', 0):
+        reasoning.append(f"Warning: {best['unserved_requests']:,} requests remain unserved; "
+                         "lower energy and heat reflect reduced service.")
 
     latency_slo_met = None
-    if latency_threshold is not None and latency_threshold > 0:
+    if best.get("served_requests", 1) == 0:
+        reasoning.append("No requests were served, so latency compliance cannot be assessed.")
+    elif latency_threshold is not None and latency_threshold > 0:
         best_latency = best.get('avg_latency_ms')
         if best_latency is not None:
             latency_slo_met = best_latency <= latency_threshold
@@ -3604,12 +2881,13 @@ def calculate_statistical_significance(mc_results):
         'sample_size': len(energy_only_ΔT)
     }
 # ---- Cache weather to avoid re-fetching every rerun ----
-@st.cache_data(ttl=1800, show_spinner=False)  # 30 min cache
+@st.cache_data(ttl=300, show_spinner=False)  # Current weather: five-minute cache.
 def cached_weather(lat, lon, name, climate_hint=None):
     lat = round(float(lat), 4)
     lon = round(float(lon), 4)
 
-    data = fetch_weather_data(lat, lon, name, climate_hint)
+    # One cache layer: a cache miss or explicit clear must reach the provider.
+    data = fetch_weather_data(lat, lon, name, climate_hint, force_refresh=True)
 
     # ✅ Important: NEVER cache None / broken payloads
     if data is None or not isinstance(data, dict):
@@ -3629,1734 +2907,10 @@ def cached_weather(lat, lon, name, climate_hint=None):
 # ============================================================================
 
 def main():
-    """Main application entry point."""
-    
-    # ========================================================================
-    # HEADER
-    # ========================================================================
-    
-    st.markdown("""
-    <div style="text-align: center; padding: 1.5rem 0;">
-        <h1 style="font-family: 'Source Serif 4', serif; font-size: 2.2rem; color: #1a1a2e; margin-bottom: 0.5rem;">
-            🌡️ AI-Assisted Datacenter Prompt Routing for ΔT-AR Mitigation
-        </h1>
-        <p style="font-family: 'Source Sans 3', sans-serif; color: #4a5568; font-size: 1.1rem; margin-bottom: 0.25rem;">
-            Demonstrating the usage of AI to mitigate localized heat concentration effect caused by datacenters
-        </p>
-        <p style="font-family: 'Source Sans 3', sans-serif; color: #718096; font-size: 0.9rem;">
-            Phani Raja Bharath Balijepalli | University of Central Florida
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Physics callout
-    st.markdown("""
-    <div class="physics-callout">
-        <strong>🔬 Core Physics Principle:</strong> Cooling systems move heat from datacenter interiors 
-        to the exterior environment. <strong>The heat doesn't disappear — it dissipates locally.</strong> 
-        Combined with carbon emissions from energy generation, there is no escape from the thermal impact 
-        of computation. This dashboard demonstrates how routing strategy choice can mitigate localized 
-        Delta-T Aware Routing (ΔT-AR) effects.
-    </div>
-    """, unsafe_allow_html=True)
+    """Render the focused dashboard without changing research/model semantics."""
+    from dashboard_ui import render_dashboard
+    render_dashboard(globals())
 
-    # # Key Formulas
-    # st.markdown("""
-    # <div class="info-box" style="background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-left: 4px solid #2563eb;">
-    #     <strong>📐 Key Formulas Used:</strong>
-    #     <table style="width: 100%; margin-top: 0.5rem; font-size: 0.9rem;">
-    #         <tr>
-    #             <td><strong>Latency:</strong></td>
-    #             <td><code>L = L_prop + L_queue + L_proc</code></td>
-    #             <td style="color: #666;">where L_prop = 2d/c (round-trip), L_queue = M/M/1 model, L_proc = 30ms</td>
-    #         </tr>
-    #         <tr>
-    #             <td><strong>Energy:</strong></td>
-    #             <td><code>E = E_base × PUE × T_factor × H_factor</code></td>
-    #             <td style="color: #666;">E_base = 0.3 Wh (Stern, 2025)</td>
-    #         </tr>
-    #         <tr>
-    #             <td><strong>ΔT-AR:</strong></td>
-    #             <td><code>ΔT = α × (Q/A) × 1/(1 + β × wind)</code></td>
-    #             <td style="color: #666;">Physics-based model</td>
-    #         </tr>
-    #         <tr>
-    #             <td><strong>Carbon:</strong></td>
-    #             <td><code>C = E × I</code></td>
-    #             <td style="color: #666;">Luccioni & Hernandez-Garcia (2023)</td>
-    #         </tr>
-    #     </table>
-    # </div>
-    # """, unsafe_allow_html=True)
-    
-    # ========================================================================
-    # SECTION 1: EXPERIMENTAL SETUP
-    # ========================================================================
-    
-    st.markdown('<div class="section-header">📍 SECTION 1: Experimental Setup</div>', unsafe_allow_html=True)
-    st.markdown("*Configure your simulation parameters below*")
-    
-    # Initialize AI models BEFORE expander (global scope)
-    ai_models = AIModelSuite()
-    
-    with st.expander("⚙️ Configure Your Experiment", expanded=True):
-        
-        # 1.1 User Location
-        st.markdown('<div class="subsection-header">1.1 User Location</div>', unsafe_allow_html=True)
-     # Persistent storage for user location
-        if "user_lat" not in st.session_state:
-            st.session_state.user_lat = 28.5383   # Orlando default
-            st.session_state.user_lon = -81.3792
-            st.session_state.user_label = "Orlando"
-            st.session_state.user_lat_input = 28.5383
-            st.session_state.user_lon_input = -81.3792
 
-        col1, col2, col3 = st.columns([2, 1, 1])
-
-        with col1:
-            # Create list of cities for dropdown
-            city_options = sorted(list(CITY_DATABASE.keys()))
-            
-            # Callback to update coordinates when city changes
-            def on_city_change():
-                selected_city = st.session_state.city_selector
-                if selected_city in CITY_DATABASE:
-                    lat, lon = CITY_DATABASE[selected_city]
-                    st.session_state.user_lat = lat
-                    st.session_state.user_lon = lon
-                    st.session_state.user_label = selected_city
-                    st.session_state.user_lat_input = lat
-                    st.session_state.user_lon_input = lon
-            
-            # Determine index
-            try:
-                default_index = city_options.index(st.session_state.user_label)
-            except ValueError:
-                default_index = 0
-                
-            st.selectbox(
-                "Select City",
-                options=city_options,
-                index=default_index,
-                key="city_selector",
-                on_change=on_city_change,
-                help="Select a city to automatically set latitude and longitude"
-            )
-
-        # Manual coordinate controls (always persistent)
-        with col2:
-            st.number_input(
-                "Latitude",
-                format="%.4f",
-                key="user_lat_input",
-                on_change=lambda: setattr(st.session_state, 'user_lat', st.session_state.user_lat_input)
-            )
-        with col3:
-            st.number_input(
-                "Longitude",
-                format="%.4f",
-                key="user_lon_input",
-                on_change=lambda: setattr(st.session_state, 'user_lon', st.session_state.user_lon_input)
-            )
-
-        # Final user location tuple - always use session state
-        user_location = (float(st.session_state.user_lat), float(st.session_state.user_lon))
-
-        # Fetch user location weather
-        user_weather = fetch_weather_data(
-            st.session_state.user_lat,
-            st.session_state.user_lon,
-            st.session_state.user_label,
-            "moderate"  # default climate hint
-        )
-
-        st.markdown('<div class="subsection-header">Figure export (paper layout)</div>', unsafe_allow_html=True)
-
-        preset_name = st.selectbox(
-            "Export preset",
-            list(FIG_EXPORT_PRESETS.keys()),
-            index=0
-        )
-        st.session_state["fig_export_cfg"] = FIG_EXPORT_PRESETS[preset_name]
-
-        st.markdown(f"""
-        <div class="info-box">
-            <strong>📡 Your Location Weather:</strong> 
-            🌡️ {user_weather['temperature']:.1f}°C | 
-            💧 {user_weather['humidity']:.0f}% | 
-            💨 {user_weather['wind_speed']:.1f} m/s |
-            📊 {user_weather.get('pressure', 1013.25):.0f} hPa |
-            ☀️ {user_weather.get('solar_radiation', 0):.0f} W/m²         
-            <br><small>Source: {user_weather['source']}</small>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # 1.2 Datacenter Selection
-        st.markdown('<div class="subsection-header">1.2 Datacenter Selection (1-3)</div>', unsafe_allow_html=True)
-
-        # ---- Build all datacenters WITHOUT calling weather here ----
-        all_datacenters: dict[str, dict[str, Any]] = {}
-
-        for dc_name, dc_info in DEFAULT_DATACENTERS.items():
-            all_datacenters[dc_name] = dc_info.copy()
-
-        for dc_name, loc in EXTENDED_DC_LOCATIONS.items():
-            all_datacenters[dc_name] = {
-                "lat": loc["lat"],
-                "lon": loc["lon"],
-                "region": loc.get("region", "default"),
-                "climate": loc.get("climate", "unknown"),
-                "description": f"{loc.get('climate', 'unknown').title()} climate datacenter",
-                "emoji": "🏢",  # will enrich after weather fetch
-                "climate_detail": None,
-                "default_cooling": None,
-            }
-
-        # ---- Initialize selection state ----
-        if "selected_dcs" not in st.session_state:
-            # default: pick first 3 (not ALL)
-            st.session_state.selected_dcs = list(all_datacenters.keys())[:3]
-
-        # ---- UI: select 1–3 datacenters ----
-        selected_dcs = st.multiselect(
-            "Choose 1–3 datacenters",
-            options=list(all_datacenters.keys()),
-            default=st.session_state.selected_dcs,
-        )
-
-        # persist selection
-        st.session_state.selected_dcs = selected_dcs
-
-        # enforce 1–3
-        if not (1 <= len(selected_dcs) <= 3):
-            st.warning("Please select between 1 and 3 datacenters.")
-            st.stop()
-
-        # ---- Fetch weather ONLY for selected, with progress ----
-        dc_weather_data: dict[str, dict[str, Any]] = {}
-        dc_details: dict[str, dict[str, Any]] = {}
-
-        total_dcs = len(selected_dcs)
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
-
-        for idx, dc_name in enumerate(selected_dcs, 1):
-            dc_info = all_datacenters[dc_name]
-            weather = {}
-
-            progress_text.text(f"🌐 Fetching weather data... ({idx}/{total_dcs})")
-            progress_bar.progress(idx / total_dcs)
-
-            try:
-                climate_hint = dc_info.get("climate_detail") or dc_info.get("climate") or "moderate"
-                weather = cached_weather(dc_info["lat"], dc_info["lon"], dc_name, climate_hint)
-
-
-            except Exception as e:
-                weather = {"error": str(e), "temperature": None, "humidity": None}
-
-            dc_weather_data[dc_name] = weather
-
-            # climate enrichment (guard against missing values)
-            temp = weather.get("temperature")
-            hum = weather.get("humidity")
-
-            if temp is not None and hum is not None:
-                climate_info = classify_climate(temp, hum)
-                all_datacenters[dc_name]["climate_detail"] = climate_info.get("climate_detail")
-                all_datacenters[dc_name]["default_cooling"] = climate_info.get("recommended_cooling")
-                all_datacenters[dc_name]["emoji"] = climate_info.get("emoji", "🏢")
-
-            # distance/latency/carbon (guard user_location existence)
-            distance = haversine_distance(user_location[0], user_location[1], dc_info["lat"], dc_info["lon"])
-            latency = calculate_latency(distance, load_fraction=0.7)
-            region = dc_info.get("region", "default")
-            carbon = get_carbon_intensity(region)
-
-            dc_details[dc_name] = {
-                "distance": distance,
-                "latency": latency,
-                "carbon": carbon,
-                "weather": weather
-            }
-
-        progress_text.empty()
-        progress_bar.empty()
-
-                
-        # Display DC selection with all available options
-        selected_dc_names = selected_dcs
-        
-        if len(selected_dc_names) == 0:
-            st.error("⚠️ Please select at least 1 datacenter!")
-        elif len(selected_dc_names) > 3:
-            st.warning("⚠️ Maximum 3 datacenters recommended for clear comparison")
-        
-        alt_datacenters: dict[str, dict[str, Any]] = all_datacenters
-        alt_weather: dict[str, dict[str, Any]] = dc_weather_data
-
-        # Display selected DC details with weather
-        if selected_dc_names:
-            dc_cols = st.columns(len(selected_dc_names))
-            
-            for i, dc_name in enumerate(selected_dc_names):
-                dc_info = alt_datacenters[dc_name]
-                alt_weather[dc_name] = cached_weather(dc_info['lat'], dc_info['lon'], dc_name, dc_info.get("climate", "moderate"))
-                details = dc_details[dc_name]
-                weather = details['weather']
-                
-                with dc_cols[i]:
-                    climate_class = dc_info['climate']
-                    st.markdown(f"""
-                    <div class="dc-card {climate_class}">
-                        <h4 style="margin: 0 0 0.5rem 0;">{dc_info['emoji']} {dc_name.split(',')[0]}</h4>
-                        <p style="color: #666; font-size: 0.85rem; margin: 0.25rem 0;">{dc_info['description']}</p>
-                        <hr style="margin: 0.5rem 0; border-color: #eee;">
-                        <p style="margin: 0.25rem 0;">🌡️ <strong>{weather['temperature']:.1f}°C</strong></p>
-                        <p style="margin: 0.25rem 0;">💧 {weather['humidity']:.0f}% humidity</p>
-                        <p style="margin: 0.25rem 0;">💨 {weather['wind_speed']:.1f} m/s wind</p>
-                        <p style="margin: 0.25rem 0;">🌡️ {weather.get('pressure', 1013.25):.0f} hPa</p>
-                        <p style="margin: 0.25rem 0;">☀️ {weather.get('solar_radiation', 0):.0f} W/m²</p>
-                        <hr style="margin: 0.5rem 0; border-color: #eee;">
-                        <p style="margin: 0.25rem 0;">📍 {details['distance']:,.0f} km</p>
-                        <p style="margin: 0.25rem 0;">⏱️ {details['latency']:.0f} ms</p>
-                        <p style="margin: 0.25rem 0;">⚡ {details['carbon']:.2f} kg CO₂/kWh</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-        # 1.3 Geographic Layout Preview
-        st.markdown('<div class="subsection-header">1.3 Geographic Layout Preview</div>', unsafe_allow_html=True)
-        #st.plotly_chart(fig_map, config=PLOTLY_CONFIG, width='stretch')
-
-        if selected_dc_names:
-            # Build a small geographic map for the current experimental setup
-            fig_setup_map = go.Figure()
-            climate_colors = {'hot': '#dc2626', 'moderate': '#d97706', 'cold': '#2563eb'}
-            # Selected datacenters
-            dc_lats = [all_datacenters[name]['lat'] for name in selected_dc_names]
-            dc_lons = [all_datacenters[name]['lon'] for name in selected_dc_names]
-            dc_labels = [name for name in selected_dc_names]
-            dc_emojis = [all_datacenters[name]['emoji'] for name in selected_dc_names]
-
-            fig_setup_map.add_trace(
-                go.Scattergeo(
-                    lon=dc_lons,
-                    lat=dc_lats,
-                    text=[f"{dc_emojis[i]} {dc_labels[i]}" for i in range(len(dc_labels))],
-                    mode="markers+text",
-                    marker=dict(
-                        size=12,
-                        color=[climate_colors.get(all_datacenters[name]['climate'], '#6b7280') for name in selected_dc_names]
-                    ),
-                    textposition="top center",
-                    textfont=dict(size=20, family='Times New Roman', color='#000000'),
-                    name="Datacenters"
-                )
-            )
-
-            # User location
-            fig_setup_map.add_trace(
-                go.Scattergeo(
-                    lon=[user_location[1]],
-                    lat=[user_location[0]],
-                    text=[f"🧑‍💻 {st.session_state.user_label} (You)"],
-                    mode="markers+text",
-                    marker=dict(size=12, symbol="star"),
-                    textposition="bottom center",
-                    textfont=dict(size=20, family='Times New Roman', color='#000000'),
-                    name="User"
-                )
-            )
-            # Draw connection lines from user to datacenters
-            climate_colors = {'hot': '#dc2626', 'moderate': '#d97706', 'cold': '#2563eb'}
-            for dc_name in selected_dc_names:
-                dc_info = all_datacenters[dc_name]
-                color = climate_colors.get(dc_info['climate'], '#6b7280')
-                fig_setup_map.add_trace(
-                    go.Scattergeo(
-                        lon=[user_location[1], dc_info['lon']],
-                        lat=[user_location[0], dc_info['lat']],
-                        mode='lines',
-                        line=dict(width=2, color=color, dash='dot'),
-                        opacity=0.5,
-                        showlegend=False,
-                        hoverinfo='skip'
-                    )
-                )
-
-            # Map styling (light-blue background, consistent with other maps)
-            fig_setup_map.update_geos(
-                projection_type="natural earth",
-                showland=True,
-                landcolor="#f3f2f0",
-                showcoastlines=True,
-                coastlinecolor="#8d99ae",
-                showcountries=True,
-                countrycolor="#d3d3d3",
-                showlakes=True,
-                lakecolor="#cfe7ff",
-                showocean=True,
-                oceancolor="#cfe7ff",
-                fitbounds="locations"
-            )
-
-            fig_setup_map.update_layout(
-                margin=dict(l=0, r=0, t=0, b=0),
-                height=600,
-                font=dict(family='Times New Roman', size=20, color='#000000'),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=0.01,
-                    xanchor="center",
-                    x=0.5,
-                    bgcolor="rgba(255,255,255,0.9)",
-                    borderwidth=1,
-                    font=dict(size=20, family='Times New Roman', color='#000000')
-                )
-            )
-
-            st.plotly_chart(fig_setup_map, config=PLOTLY_CONFIG_CLEAN, width='stretch')
-        else:
-            st.info("Select at least one datacenter to see the geographic preview.")
-
-
-        # 1.4 Simulation Parameters
-        st.markdown('<div class="subsection-header">1.4 Simulation Parameters</div>', unsafe_allow_html=True)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            num_requests = st.slider(
-                "Total Requests",
-                min_value=100,
-                max_value=10000,
-                value=1000,
-                step=100,
-                help="Number of AI inference requests to simulate"
-            )
-            
-            latency_threshold = st.slider(
-                "Latency Threshold (ms)",
-                min_value=50,
-                max_value=200,
-                value=100,
-                step=10,
-                help="Maximum acceptable latency for routing decisions"
-            )
-            max_dc_capacity_mw = st.slider(
-"Max Power Capacity per Datacenter (MW)",
-min_value=10, max_value=200, value=100, step=10,
-help="Limits max energy draw per DC in megawatts. Used to cap request allocation."
-)
-        
-        with col2:
-            energy_multiplier = st.slider(
-                "Energy Multiplier",
-                min_value=0.5,
-                max_value=2.0,
-                value=1.0,
-                step=0.1,
-                help="0.5=light prompts, 1.0=standard, 2.0=image generation"
-            )
-            
-            enable_monte_carlo = st.checkbox("Enable Monte Carlo Analysis", value=True)
-            
-            if enable_monte_carlo:
-                n_monte_carlo = st.slider(
-                    "Monte Carlo Runs",
-                    min_value=20,
-                    max_value=500,
-                    value=100,
-                    step=20
-                )
-            else:
-                n_monte_carlo = 0
-        
-        # Check latency warnings
-        latency_warnings = []
-        for dc_name in selected_dc_names:
-            if dc_details[dc_name]['latency'] > latency_threshold:
-                latency_warnings.append(
-                    f"⚠️ **{dc_name.split(',')[0]}**: Latency ({dc_details[dc_name]['latency']:.0f}ms) "
-                    f"exceeds threshold ({latency_threshold}ms)"
-                )
-        
-        if latency_warnings:
-            st.markdown("---")
-            st.markdown("**Latency Warnings:**")
-            for warning in latency_warnings:
-                st.warning(warning)
-            proceed_anyway = st.checkbox("Proceed with all selected datacenters anyway", value=True)
-        else:
-            proceed_anyway = True
-        
-        # 1.5 AI Model Selection
-        st.markdown('<div class="subsection-header">1.5 AI Model Selection</div>', unsafe_allow_html=True)
-        
-        model_choice = st.radio(
-            "Select AI Models to Train",
-            options=[
-                "Train All & Compare (Recommended)",
-                "Multiple Linear Regression (MLR) only",
-                "Artificial Neural Network (ANN) only",
-                "Bayesian Optimization only" if BAYES_AVAILABLE else "Bayesian (Not Available)"
-            ],
-            index=0,
-            help="Choose which AI models to train for energy prediction"
-        )
-        
-        if "Bayesian" in model_choice and not BAYES_AVAILABLE:
-            st.warning("Bayesian Optimization requires `bayesian-optimization` package. Install with: `pip install bayesian-optimization`")
-    
-    # Run Simulation Button
-    st.markdown("---")
-
-    # Initialize a persistent flag for whether simulation has been run at least once
-    if "simulation_run" not in st.session_state:
-        st.session_state.simulation_run = False
-
-    # ---- simulation caching ----
-    if "sim_results" not in st.session_state:
-        st.session_state.sim_results = None
-    if "sim_key" not in st.session_state:
-        st.session_state.sim_key = None
-    if "force_sim_rerun" not in st.session_state:
-        st.session_state.force_sim_rerun = False
-    if "temp_sensitivity" not in st.session_state:
-        st.session_state.temp_sensitivity = None
-    if "scenario_results" not in st.session_state:
-        st.session_state.scenario_results = None
-
-    run_button = st.button("▶️ RUN SIMULATION", type="primary", width='stretch', key="run_sim_btn")
-
-    # If the button is clicked on this run, mark simulation as started
-    if run_button:
-        st.session_state.simulation_run = True
-        st.session_state.force_sim_rerun = True  # force rerun on next section
-    # If simulation has never been started, block the rest of the page
-    if not st.session_state.simulation_run:
-        st.info("👆 Configure your experiment above and click 'RUN SIMULATION' to begin!")
-        st.stop()
-
-    
-    # Validation
-    if len(selected_dc_names) == 0:
-        st.error("❌ Please select at least 1 datacenter!")
-        st.stop()
-    
-    if not proceed_anyway:
-        st.error("❌ Please address latency warnings or check 'Proceed anyway'")
-        st.stop()
-    
-    # Prepare active datacenters
-    active_datacenters = {k: all_datacenters[k] for k in selected_dc_names}
-    weather_data = {k: dc_weather_data[k] for k in selected_dc_names}
-    
-    # Default cooling selections
-    if 'cooling_selections' not in st.session_state or set(st.session_state.cooling_selections.keys()) != set(selected_dc_names):
-        st.session_state.cooling_selections = {k: all_datacenters[k]['default_cooling'] for k in selected_dc_names}
-    
-    cooling_selections = st.session_state.cooling_selections
-    
-    # Progress indicator
-    progress_bar = st.progress(0, text="Initializing simulation...")
-    
-    # ========================================================================
-    # SECTION 2: REAL-TIME CLIMATIC CONDITIONS
-    # ========================================================================
-    
-    progress_bar.progress(10, text="Fetching weather data...")
-    
-    st.markdown('<div class="section-header">🌤️ SECTION 2: Real-Time Climatic Conditions</div>', unsafe_allow_html=True)
-    st.markdown("*Current weather and environmental data for selected datacenters*")
-    
-    # 2.1 Weather Cards (already displayed above, but show summary)
-    st.markdown('<div class="subsection-header">2.1 Datacenter Weather Summary</div>', unsafe_allow_html=True)
-    
-    weather_df = pd.DataFrame([
-        {
-            'Datacenter': dc_name.split(',')[0],
-            'Climate': active_datacenters[dc_name]['emoji'] + ' ' + active_datacenters[dc_name]['climate'].title(),
-            'Temperature (°C)': f"{weather_data[dc_name]['temperature']:.1f}",
-            'Humidity (%)': f"{weather_data[dc_name]['humidity']:.0f}",
-            'Wind (m/s)': f"{weather_data[dc_name]['wind_speed']:.1f}",
-            'Pressure (hPa)': f"{weather_data[dc_name].get('pressure', 1013.25):.1f}",
-            'Solar (W/m²)': f"{weather_data[dc_name].get('solar_radiation', 0.0):.0f}",
-            'Carbon (kg/kWh)': f"{dc_details[dc_name]['carbon']:.3f}",
-            'Distance (km)': f"{dc_details[dc_name]['distance']:,.0f}",
-            'Latency (ms)': f"{dc_details[dc_name]['latency']:.0f}"
-        }
-        for dc_name in selected_dc_names
-    ])
-    st.dataframe(weather_df, width='stretch', hide_index=True)
-    
-    # 2.2 Geographic Map
-    st.markdown('<div class="subsection-header">2.2 Geographic Visualization (Map #1)</div>', unsafe_allow_html=True)
-    
-    fig_map1 = create_geographic_map(active_datacenters, user_location,
-                                     title="User Location and Datacenter Positions")
-    st.plotly_chart(fig_map1, config=PLOTLY_CONFIG, width='stretch')
-    
-    # 2.3 Initial Recommendation
-    st.markdown('<div class="subsection-header">2.3 Initial Recommendation</div>', unsafe_allow_html=True)
-    
-    initial_rec = generate_initial_recommendation(active_datacenters, weather_data, 
-                                                   user_location, latency_threshold)
-    
-    if initial_rec['recommended']:
-        st.markdown(f"""
-        <div class="success-box">
-            <h4 style="margin: 0 0 0.5rem 0;">🎯 Recommended: {initial_rec['recommended']}</h4>
-            <p style="margin: 0.5rem 0;"><strong>Reasoning:</strong></p>
-            <ul style="margin: 0.25rem 0;">
-                {''.join(f'<li>{r}</li>' for r in initial_rec['reasoning'])}
-            </ul>
-            {'<p style="margin: 0.5rem 0;"><strong>Alternatives:</strong></p><ul>' + ''.join(f'<li>{a}</li>' for a in initial_rec.get('alternatives', [])) + '</ul>' if initial_rec.get('alternatives') else ''}
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.warning("No datacenter meets the current latency threshold.")
-    
-    # ========================================================================
-    # SECTION 3: THE DETERMINISTIC PROBLEM
-    # ========================================================================
-    
-    progress_bar.progress(20, text="Calculating deterministic problem...")
-    
-    st.markdown('<div class="section-header">⚠️ SECTION 3: The Deterministic Problem</div>', unsafe_allow_html=True)
-    st.markdown("*What happens with simple energy-only routing (before AI optimization)*")
-    
-    # 3.1 Cooling Assignment
-    st.markdown('<div class="subsection-header">3.1 Cooling Technology Assignment</div>', unsafe_allow_html=True)
-    
-    cooling_df = pd.DataFrame([
-        {
-            'Datacenter': dc_name.split(',')[0],
-            'Climate': active_datacenters[dc_name]['climate'].title(),
-            'Cooling Technology': COOLING_SYSTEMS[cooling_selections[dc_name]]['name'],
-            'PUE': COOLING_SYSTEMS[cooling_selections[dc_name]]['pue']
-        }
-        for dc_name in selected_dc_names
-    ])
-    st.dataframe(cooling_df, width='stretch', hide_index=True)
-    
-    st.markdown("""
-    <div class="reference-box">
-        <strong>Source:</strong> Alkrush, A.A. et al. (2024). "Data centers cooling: A critical review 
-        of techniques, challenges, and energy saving solutions." <em>International Journal of Refrigeration</em>, 160, 246-262.
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # 3.2 Energy Calculation
-    # st.markdown('<div class="subsection-header">3.2 Energy Calculation</div>', unsafe_allow_html=True)
-    
-    # st.latex(r"E = E_{base} \times PUE \times (1 + \alpha \times \max(0, T - 20))")
-    
-    # st.markdown(f"""
-    # **Parameters:**
-    # - E_base = {BASE_ENERGY_WH} Wh (Stern, 2025 - WSJ datacenter measurement)
-    # - α = 0.015 (temperature sensitivity coefficient)
-    # - PUE = Power Usage Effectiveness from cooling technology
-    # """)
-    
-    # Calculate energy for each DC
-    energy_calc_df = pd.DataFrame([
-        {
-            'Datacenter': dc_name.split(',')[0],
-            'Temp (°C)': weather_data[dc_name]['temperature'],
-            'PUE': COOLING_SYSTEMS[cooling_selections[dc_name]]['pue'],
-            'Temp Factor': 1 + 0.015 * max(0, weather_data[dc_name]['temperature'] - 20),
-            'Energy/Req (Wh)': calculate_energy_per_request(
-                weather_data[dc_name]['temperature'],
-                weather_data[dc_name]['humidity'],
-                cooling_selections[dc_name]
-            )
-        }
-        for dc_name in selected_dc_names
-    ])
-    st.dataframe(energy_calc_df, width='stretch', hide_index=True)
-    
-    # Find lowest energy DC
-    lowest_energy_dc = energy_calc_df.loc[energy_calc_df['Energy/Req (Wh)'].idxmin(), 'Datacenter']
-    
-    # 3.3 The Cold DC Concentration Problem
-    st.markdown('<div class="subsection-header">3.3 The Cold DC Concentration Problem (Graph #2)</div>', unsafe_allow_html=True)
-    
-    # Run energy-only routing
-    energy_only_dist = route_energy_only(active_datacenters, weather_data, cooling_selections, num_requests)
-    
-    # Find concentration
-    total_reqs = sum(energy_only_dist.values())
-    max_dc = max(energy_only_dist, key=lambda dc: energy_only_dist[dc])
-    max_pct = (energy_only_dist[max_dc] / total_reqs) * 100 if total_reqs > 0 else 0
-    
-    concentration_detected = max_pct > 60
-    
-    if concentration_detected:
-        st.markdown(f"""
-        <div class="warning-box">
-            <h4 style="margin: 0 0 0.5rem 0; color: #b45309;">⚠️ CONCENTRATION PROBLEM DETECTED</h4>
-            <p>Energy-only routing sends <strong>{max_pct:.1f}%</strong> of traffic to 
-            <strong>{max_dc.split(',')[0]}</strong> because it has the lowest energy cost per request.</p>
-            <p style="margin-top: 0.5rem;"><em>"This creates severe localized heat dissipation that 
-            defeats sustainability goals."</em></p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Create distribution chart
-    deterministic_results = {
-        'Energy-Only': {
-            'distribution': energy_only_dist,
-            'datacenters': {}
-        }
-    }
-    
-    # Calculate heat for energy-only
-    for dc_name, requests in energy_only_dist.items():
-        energy_per_req = calculate_energy_per_request(
-            weather_data[dc_name]['temperature'],
-            weather_data[dc_name]['humidity'],
-            cooling_selections[dc_name]
-        )
-        heat = float(energy_per_req) * float(requests)
-        deterministic_results['Energy-Only']['datacenters'][dc_name] = {
-            'requests': requests,
-            'percentage': (requests / total_reqs) * 100,
-            'heat_kwh': heat / 1000
-        }
-    
-    # Bar chart for energy-only distribution
-    fig_det_dist = go.Figure()
-    
-    for dc_name in selected_dc_names:
-        pct = (energy_only_dist[dc_name] / total_reqs) * 100
-        climate = active_datacenters[dc_name]['climate']
-        color = {'hot': '#dc2626', 'moderate': '#d97706', 'cold': '#2563eb'}[climate]
-        
-        fig_det_dist.add_trace(go.Bar(
-            x=[dc_name.split(',')[0]],
-            y=[pct],
-            name=dc_name.split(',')[0],
-            marker_color=color,
-            text=[f"<b>{pct:.1f}%</b>"],
-            textposition='auto',
-            textfont=dict(size=28, color='#000000', family='Times New Roman')
-        ))
-
-    fig_det_dist.update_layout(
-        title=dict(text="<b>Energy-Only Routing: Traffic Distribution</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Traffic (%)</b>",
-                        font=dict(size=36, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Datacenter</b>",
-                        font=dict(size=36, family='Times New Roman', color='#000000')),
-        height=800,
-        margin=dict(l=100, r=60, t=120, b=100),
-        showlegend=False,
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        plot_bgcolor='white',
-        paper_bgcolor='white'
-    )
-    
-    st.plotly_chart(fig_det_dist, config=PLOTLY_CONFIG, width='stretch')
-    
-    # 3.4 Heat Concentration Map
-    st.markdown('<div class="subsection-header">3.4 Heat Concentration Visualization (Map #2)</div>', unsafe_allow_html=True)
-    
-    fig_map2 = create_geographic_map(active_datacenters, user_location, energy_only_dist,
-                                     title="Heat Concentration with Energy-Only Routing")
-    st.plotly_chart(fig_map2, config=PLOTLY_CONFIG, width='stretch')
-    
-    st.markdown("""
-    <div class="physics-callout">
-        <strong>💡 Key Physics Insight:</strong> "Cooling technology moves heat from datacenter interior 
-        to exterior environment. The heat doesn't disappear — it dissipates locally. This creates 
-        Delta-T Aware Routing effects proportional to the concentrated workload."
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # ========================================================================
-    # SECTION 4: AI MODEL TRAINING
-    # ========================================================================
-    
-    progress_bar.progress(35, text="Training AI models...")
-    
-    st.markdown('<div class="section-header">🤖 SECTION 4: AI Model Training</div>', unsafe_allow_html=True)
-    st.markdown("*Training machine learning models for energy prediction*")
-    
-    # 4.1 Training Data
-    st.markdown('<div class="subsection-header">4.1 Training Data Generation</div>', unsafe_allow_html=True)
-    
-    st.markdown("""
-    **Features (X):**
-    - Temperature (°C): Range 0–45  *(Open-Meteo: temperature_2m)*
-    - Humidity (%): Range 20–95  *(Open-Meteo: relative_humidity_2m)*
-    - Wind Speed (m/s): Range 0.5–15  *(Open-Meteo: wind_speed_10m)*
-    - Surface Pressure (hPa): Typical 950–1050 *(Open-Meteo: surface_pressure)*
-    - Shortwave Radiation (W/m²): Typical 0–1000 *(Open-Meteo: shortwave_radiation)*
-    - Cooling Type (encoded): 0–4  *(air_economizer / chilled_water / direct_evap / liquid / immersion)*
-
-    **Why pressure + solar matter:**
-
-    Pressure is a proxy for synoptic conditions that correlate with air density / weather regime (helps generalization). Solar radiation captures external thermal loading that increases cooling demand and worsens local heat rejection.
-
-    **Target (y):**
-    - Energy per Request (Wh)
-
-    **Dataset:** Historical weather data (2021–2024) from Open-Meteo for all datacenter locations, with energy labels generated from the physics-based power model (and noise for realism).
-
-    **Prediction:** Real-time current weather is used when making routing predictions.
-    """)
-    
-    # Train models (ai_models already initialized above)
-     
-    if "All" in model_choice:
-        train_mode = 'all'
-    elif "MLR" in model_choice:
-        train_mode = 'mlr'
-    elif "ANN" in model_choice:
-        train_mode = 'ann'
-    else:
-        train_mode = 'bayesian' if BAYES_AVAILABLE else 'mlr'
-    
-    train_msg_ph = st.empty()
-    train_bar_ph = st.empty()
-    train_bar = train_bar_ph.progress(0)
-
-    def _ui_progress(pct, msg):
-        try:
-            pct = max(0.0, min(1.0, float(pct)))
-        except Exception:
-            pct = 0.0
-        train_msg_ph.markdown(f"**{msg}**  \n{int(pct * 100)}%")
-        train_bar.progress(int(pct * 100))
-
-    model_results = ai_models.train_all(train_mode, progress_cb=_ui_progress)
-    _ui_progress(1.0, "Training complete")
-
-    
-    joblib.dump(
-        {
-            "models": ai_models.models,  # sklearn models are serializable
-            "scalers": ai_models.scalers,
-            "metrics": ai_models.metrics,
-            "model_results": model_results,
-            "best_model_name": ai_models.best_model_name,
-            "feature_names": ai_models.feature_names,
-            "training_source": ai_models.training_source,
-            "training_samples": ai_models.training_samples,
-        },
-        MODEL_BUNDLE_PATH,
-    )
-    st.success(f"Saved trained models to: {MODEL_BUNDLE_PATH}")
-    
-    st.markdown('<div class="subsection-header">4.2 Model Performance Comparison (Graph #3)</div>', unsafe_allow_html=True)
-    
-    # Display model cards with train/val/test metrics
-    model_cols = st.columns(3)
-    model_names = ['MLR', 'ANN', 'Bayesian']
-    model_colors = ['#3b82f6', '#10b981', '#f59e0b']
-    best_model_name, best_r2 = ai_models.get_best_model()
-    
-    for i, model_name in enumerate(model_names):
-        with model_cols[i]:
-            if model_name in model_results and isinstance(model_results[model_name], dict) and 'r2' in model_results[model_name]:
-                r = model_results[model_name]
-                is_best = model_name == best_model_name
-                
-                # Determine status color
-                status_color = {
-                    'Good Fit': '#10b981',
-                    'Overfitting': '#f59e0b',
-                    'Underfitting': '#ef4444'
-                }.get(r.get('status', 'Unknown'), '#6b7280')
-                
-                st.markdown(f"""
-                <div class="metric-card" style="border: 2px solid {model_colors[i]}; {'box-shadow: 0 0 10px ' + model_colors[i] + '40;' if is_best else ''}">
-                    <div style="font-size: 1.1rem; font-weight: 600; color: {model_colors[i]};">
-                        {model_name} {'👑' if is_best else ''}
-                    </div>
-                    <div class="metric-value" style="color: {model_colors[i]};">Test R² = {r['r2']:.4f}</div>
-                    <div class="metric-label">Train R²: {r.get('train_r2', 0):.4f}</div>
-                    <div class="metric-label">Val R²: {r.get('val_r2', 0):.4f}</div>
-                    <div class="metric-label" style="color: {status_color}; font-weight: 600;">
-                        {r.get('status', 'Unknown')}
-                    </div>
-                    <hr style="margin: 0.5rem 0;">
-                    <div class="metric-label">Test MAE: {r['mae']:.4f} Wh</div>
-                    <div class="metric-label">Test RMSE: {r['rmse']:.4f} Wh</div>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div class="metric-card" style="border: 2px solid #ccc;">
-                    <div style="font-size: 1.1rem; font-weight: 600; color: #999;">
-                        {model_name}
-                    </div>
-                    <div class="metric-label">Not trained</div>
-                </div>
-                """, unsafe_allow_html=True)
-    
-    # Train/Val/Test Comparison Chart
-    st.markdown("### Train vs Validation vs Test Performance")
-    fig_tvt = create_train_val_test_comparison(model_results)
-    if fig_tvt:
-        st.plotly_chart(fig_tvt, config=PLOTLY_CONFIG, width='stretch')
-        
-        st.markdown("""
-        **Interpretation:**
-        - **Good Fit**: Train ≈ Val ≈ Test (all bars similar height)
-        - **Overfitting**: Train > Test (training bar much higher)
-        - **Underfitting**: All bars low (R² < 0.7)
-        """)
-    
-    # Learning Curve
-    st.markdown("### Neural Network Training Convergence")
-    fig_lc = create_learning_curve_chart(model_results)
-    if fig_lc:
-        st.plotly_chart(fig_lc, config=PLOTLY_CONFIG, width='stretch')
-        st_figure_downloads(fig_lc, "fig_ann_convergence")
-        st.markdown("**Finding:** Loss decreases with epoch (and validation R² stabilizes when early-stopping is enabled), indicating convergence.")
-
-    
-    st.markdown("### Bayesian Hyperparameter Optimization Convergence")
-    fig_bo = create_bayesopt_convergence_chart(model_results)
-    if fig_bo:
-        st.plotly_chart(fig_bo, config=PLOTLY_CONFIG, width='stretch')
-        st.markdown("**Finding:** Validation R² improves across BO iterations and stabilizes near the best configuration.")
-
-    
-    # Model comparison chart (keep existing)
-    fig_model_comp = create_model_comparison_chart(model_results)
-    if fig_model_comp:
-        st.plotly_chart(fig_model_comp, config=PLOTLY_CONFIG, width='stretch')
-    
-    st.markdown(f"""
-    <div class="success-box">
-        <strong>✅ Best Model:</strong> {best_model_name} with Test R² = {best_r2:.4f} ({model_results[best_model_name].get('status', 'Unknown')})
-        <br>This model will be used for energy predictions in routing strategies.
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # 4.3 Prediction vs Actual
-    st.markdown('<div class="subsection-header">4.3 Prediction vs Actual (Graph #4)</div>', unsafe_allow_html=True)
-    
-    fig_scatter = create_prediction_scatter(model_results, best_model_name)
-    if fig_scatter:
-        st.plotly_chart(fig_scatter, config=PLOTLY_CONFIG, width='stretch')
-    
-    # 4.4 Feature Importance
-    st.markdown('<div class="subsection-header">4.4 Feature Importance (Graph #5)</div>', unsafe_allow_html=True)
-    
-    if 'feature_importance' in model_results:
-        fig_importance = create_feature_importance_chart(model_results['feature_importance'], best_model_name)
-        if fig_importance:
-            st.plotly_chart(fig_importance, config=PLOTLY_CONFIG, width='stretch')
-
-        # Get top 2 features dynamically from the best model
-        model_importance = model_results['feature_importance'].get(best_model_name, {})
-        sorted_features = sorted(model_importance.items(), key=lambda x: abs(x[1]), reverse=True)
-        top_features = [f[0].replace('_', ' ').title() for f in sorted_features[:2]]
-        
-        st.markdown(f"""
-        **Finding:** {top_features[0]} and {top_features[1]} are the dominant factors 
-        influencing energy consumption per request.
-        """)
-        
-    SAVE_DIR = "saved_runs"
-    os.makedirs(SAVE_DIR, exist_ok=True)
-
-    colA, colB = st.columns(2)
-
-    with colA:
-        if st.button("💾 Save trained models + results", key="save_bundle_btn"):
-            model_bundle = {
-                "models": ai_models.models,
-                "scalers": ai_models.scalers,
-                "metrics": ai_models.metrics,
-                "best_model_name": ai_models.best_model_name,
-                "feature_names": ai_models.feature_names,
-                "training_source": ai_models.training_source,
-                "training_samples": ai_models.training_samples,
-            }
-            joblib.dump(model_bundle, os.path.join(SAVE_DIR, "ai_models.joblib"))
-            joblib.dump(st.session_state.get("sim_results", None), os.path.join(SAVE_DIR, "sim_results.joblib"))
-            st.success("Saved to saved_runs/")
-
-    with colB:
-        if st.button("📂 Load trained models + results", key="load_bundle_btn"):
-            try:
-                bundle = joblib.load(os.path.join(SAVE_DIR, "ai_models.joblib"))
-                ai_models.models = bundle["models"]
-                ai_models.scalers = bundle["scalers"]
-                ai_models.metrics = bundle["metrics"]
-                ai_models.best_model_name = bundle["best_model_name"]
-                ai_models.feature_names = bundle["feature_names"]
-                ai_models.training_source = bundle.get("training_source", "unknown")
-                ai_models.training_samples = bundle.get("training_samples", 0)
-                ai_models.is_trained = True
-                # Restore best_model reference
-                if ai_models.best_model_name and ai_models.best_model_name in ai_models.models:
-                    ai_models.best_model = ai_models.models[ai_models.best_model_name]
-                st.session_state.sim_results = joblib.load(os.path.join(SAVE_DIR, "sim_results.joblib"))
-                st.success("Loaded from saved_runs/")
-            except FileNotFoundError:
-                st.error("No saved models found. Run and save first.")
-    # ========================================================================
-    # SECTION 5: ROUTING STRATEGY COMPARISON
-    # ========================================================================
-    
-    progress_bar.progress(50, text="Comparing routing strategies...")
-    
-    st.markdown('<div class="section-header">🔀 SECTION 5: Routing Strategy Comparison</div>', unsafe_allow_html=True)
-    st.markdown("*Comparing different approaches to datacenter selection*")
-    
-    # 5.1 Strategy Definitions
-    st.markdown('<div class="subsection-header">5.1 Strategy Definitions</div>', unsafe_allow_html=True)
-    
-    st.markdown("""
-    | Strategy | Description | Formula |
-    |----------|-------------|---------|
-    | **1️⃣ Random** | Baseline uniform distribution | Random allocation of prompts for each DC |
-    | **2️⃣ Energy-Only** | Route to lowest energy DC | Minimize energy consumption |
-    | **3️⃣ ΔT-AR** | Minimize delta-T aware routing effect | Minimize peak ΔT |
-    | **4️⃣ Multi-Objective** | Balance all factors | Weighted combination |
-    """)
-    
-    # Run initial simulation for all strategies
-    
-
-    # Build a key from inputs that should trigger a re-run
-    # Note: best_model_name excluded - model choice shouldn't trigger sim rerun
-    sim_inputs = {
-        "selected_dc_names": selected_dc_names,
-        "num_requests": num_requests,
-        "cooling_selections": dict(st.session_state.cooling_selections),
-        "energy_multiplier": energy_multiplier,
-        "latency_threshold": latency_threshold,
-    }
-
-    sim_key = hashlib.md5(json.dumps(sim_inputs, sort_keys=True, default=str).encode()).hexdigest()
-
-    need_run = (
-        st.session_state.force_sim_rerun
-        or st.session_state.sim_results is None
-        or st.session_state.sim_key != sim_key
-    )
-
-    if need_run:
-        st.session_state.sim_key = sim_key
-        st.session_state.sim_results = run_simulation(
-            active_datacenters, weather_data, user_location,
-            num_requests, cooling_selections, energy_multiplier, ai_models, latency_threshold,
-            max_dc_capacity_mw
-        )
-        st.session_state.force_sim_rerun = False
-
-    results = st.session_state.sim_results
-    
-    # Guard against None results
-    if results is None:
-        st.warning("⚠️ Please click 'RUN SIMULATION' button above to see results.")
-        st.stop()
-
-    # 5.2 Strategy Summary    
-    fig_traffic = create_traffic_distribution_chart(results, title="Traffic Distribution by Strategy")
-    if fig_traffic:
-        st.plotly_chart(fig_traffic, config=PLOTLY_CONFIG, width='stretch')
-    
-    # 5.4 Cooling Configuration
-    st.markdown('<div class="subsection-header">5.3 Cooling Technology Configuration</div>', unsafe_allow_html=True)
-    
-    st.markdown("*Adjust cooling technology for each datacenter (affects PUE and results):*")
-    
-    cool_cols = st.columns(len(selected_dc_names))
-    new_cooling_selections = {}
-    
-    for i, dc_name in enumerate(selected_dc_names):
-        with cool_cols[i]:
-            dc_info = active_datacenters[dc_name]
-            default_cooling = cooling_selections[dc_name]
-            
-            new_cooling = st.selectbox(
-                f"{dc_info['emoji']} {dc_name.split(',')[0]}",
-                options=list(COOLING_SYSTEMS.keys()),
-                index=list(COOLING_SYSTEMS.keys()).index(default_cooling),
-                format_func=lambda x: f"{COOLING_SYSTEMS[x]['icon']} {COOLING_SYSTEMS[x]['name']} (PUE: {COOLING_SYSTEMS[x]['pue']})",
-                key=f"cooling_select_{dc_name}"
-            )
-            new_cooling_selections[dc_name] = new_cooling
-    
-    # Check if cooling changed (only on actual user interaction, not button reruns)
-    cooling_actually_changed = False
-    for dc_name in new_cooling_selections:
-        widget_key = f"cooling_select_{dc_name}"
-        if widget_key in st.session_state:
-            current_widget_value = st.session_state[widget_key]
-            stored_value = st.session_state.cooling_selections.get(dc_name)
-            if current_widget_value != stored_value:
-                cooling_actually_changed = True
-                st.session_state.cooling_selections[dc_name] = current_widget_value
-    
-    if cooling_actually_changed:
-        st.session_state.force_sim_rerun = True
-        st.info("🔄 Cooling updated — simulation will refresh.")
-        st.rerun()
-    
-    # ========================================================================
-    # SECTION 6: COMPREHENSIVE RESULTS
-    # ========================================================================
-    
-    progress_bar.progress(65, text="Analyzing results...")
-    
-    st.markdown('<div class="section-header">📊 SECTION 6: Comprehensive Results</div>', unsafe_allow_html=True)
-    st.markdown("*Complete performance metrics across all strategies*")
-    
-    # 6.1 Metrics Table
-    st.markdown('<div class="subsection-header">6.1 Metrics Comparison Table</div>', unsafe_allow_html=True)
-    
-    metrics_df = pd.DataFrame([
-        {
-            'Strategy': strategy,
-            'Energy (Wh)': f"{results[strategy]['totals']['energy_wh']:.1f}",
-            'Carbon (g)': f"{results[strategy]['totals']['carbon_g']:.1f}",
-            'Latency (ms)': f"{results[strategy]['totals']['avg_latency_ms']:.1f}",
-            'Peak ΔT-AR (°C)': f"{results[strategy]['totals']['peak_ΔT']:.4f}",
-            'Heat CV': f"{results[strategy]['totals']['heat_cv']:.3f}"
-        }
-        for strategy in results.keys()
-    ])
-    st.dataframe(metrics_df, width='stretch', hide_index=True)
-    
-    # 6.2 Multi-metric Chart
-    st.markdown('<div class="subsection-header">6.2 Multi-Metric Comparison (Graph #7)</div>', unsafe_allow_html=True)
-    
-    fig_metrics = create_metrics_comparison_chart(results)
-    st.plotly_chart(fig_metrics, config=PLOTLY_CONFIG, width='stretch')
-    
-    # 6.3 Heat Distribution
-    st.markdown('<div class="subsection-header">6.3 Heat Distribution by Strategy (Graph #8)</div>', unsafe_allow_html=True)
-    
-    fig_heat = create_heat_distribution_chart(results)
-    st.plotly_chart(fig_heat, config=PLOTLY_CONFIG, width='stretch')
-    
-    # 6.4 Final Map
-    st.markdown('<div class="subsection-header">6.4 Geographic Distribution (Map #3)</div>', unsafe_allow_html=True)
-    
-    map_strategy = st.radio(
-        "Select strategy to visualize:",
-        options=list(results.keys()),
-        index=3,  # Multi-Objective by default
-        horizontal=True
-    )
-    
-    fig_map3 = create_geographic_map(
-        active_datacenters, user_location,
-        results[map_strategy]['distribution'],
-        title=f"Traffic Distribution: {map_strategy} Strategy"
-    )
-    st.plotly_chart(fig_map3, config=PLOTLY_CONFIG, width='stretch')
-    
-  # 6.5 Final Recommendation
-    st.markdown('<div class="subsection-header">6.5 Final Recommendation</div>', unsafe_allow_html=True)
-
-    final_rec = generate_final_recommendation(results, latency_threshold)
-
-    imp = final_rec["improvements"]
-    ΔT_pct = imp["ΔT_reduction_pct"]
-    cv_pct = imp["cv_reduction_pct"]
-    latency_pct = imp["latency_change_pct"]   # negative = latency improves
-    energy_pct = imp["energy_overhead_pct"]
-
-    st.markdown(
-        f"""
-    <div class="success-box">
-    <h4 style="margin: 0 0 0.75rem 0;">
-    🎯 Recommended Strategy: {final_rec['recommended_strategy']}
-    </h4>
-
-    <p style="margin: 0.5rem 0;">
-        <strong>Based on the multi-metric evaluation (Energy, Latency, Carbon, and ΔT-AR),
-        the ΔT-AR strategy delivers the strongest overall sustainability
-        performance compared to Energy-Only routing.</strong>
-    </p>
-
-    <p style="margin: 0.5rem 0;"><strong>Measured Effects (vs. Energy-Only):</strong></p>
-    <ul style="margin: 0 0 1rem 0;">
-        <li>🌡️ <strong>{ΔT_pct:.1f}% reduction in peak ΔT-AR</strong></li>
-        <li>🔥 <strong>{cv_pct:.1f}% reduction in heat concentration (CV)</strong></li>
-        <li>⏱️ {(-latency_pct):.1f}% lower latency</li>
-        <li>⚡ ~{energy_pct:.1f}% energy overhead to achieve these gains</li>
-    </ul>
-
-    <p style="margin-top: 0.75rem; font-style: italic;">
-        <strong>Interpretation:</strong> A modest energy overhead of about {energy_pct:.1f}% yields
-        a disproportionately large sustainability benefit, reducing localized thermal
-        stress by ~{ΔT_pct:.1f}% and smoothing heat distribution by ~{cv_pct:.1f}%, 
-        while slightly improving latency. This trade-off represents a more optimal and
-        resilient routing policy than traditional Energy-Only optimization.
-    </p>
-    </div>
-    """,
-        unsafe_allow_html=True,
-    )
-
-  
-    # ========================================================================
-    # SECTION 7: MONTE CARLO VALIDATION
-    # ========================================================================
-    
-    if enable_monte_carlo and n_monte_carlo > 0:
-        progress_bar.progress(75, text=f"Running Monte Carlo simulation ({n_monte_carlo} runs)...")
-        
-        st.markdown('<div class="section-header">🎲 SECTION 7: Monte Carlo Validation</div>', unsafe_allow_html=True)
-        st.markdown("*Statistical validation through repeated stochastic simulation*")
-        
-        # 7.1 Stochastic Variables - Monte Carlo
-        st.markdown('<div class="subsection-header">7.1 Stochastic Variables</div>', unsafe_allow_html=True)
-        
-        st.markdown("""
-        | Variable | Distribution | Parameters |
-        |----------|--------------|------------|
-        | Temperature | Normal | μ = current, σ = 5°C |
-        | Humidity | Normal | μ = current, σ = 15% |
-        | Wind Speed | Normal | μ = current, σ = 2 m/s |
-        | Pressure | Normal | μ = current, σ = 10 hPa |
-        | Solar Radiation | Normal | μ = current, σ = 100 W/m² |   
-        | Request Volume | Uniform | ±20% of base |
-        """)
-        
-        # Run Monte Carlo
-        mc_progress = st.progress(0, text="Running Monte Carlo simulations...")
-        
-        mc_results = run_monte_carlo(
-            active_datacenters, weather_data, user_location,
-            num_requests, cooling_selections, energy_multiplier, ai_models, n_monte_carlo
-        )
-        
-        mc_progress.progress(100, text=f"✅ Completed {n_monte_carlo} simulations")
-        
-        # 7.3 Box Plots
-        st.markdown('<div class="subsection-header">7.2 Distribution Analysis (Graphs #9-12)</div>', unsafe_allow_html=True)
-        
-        fig_mc_box = create_monte_carlo_boxplots(mc_results)
-        st.plotly_chart(fig_mc_box, config=PLOTLY_CONFIG, width='stretch')
-
-        st_figure_downloads(fig_mc_box, "fig_mc_boxplots")
-
-        st.markdown("#### 7.2.1 Mean ± 95% CI of the mean")
-        fig_mc_ci = create_monte_carlo_mean_ci_chart(mc_results)
-        st.plotly_chart(fig_mc_ci, config=PLOTLY_CONFIG, width='stretch')
-        st_figure_downloads(fig_mc_ci, "fig_mc_mean_ci")
-
-        st.markdown("#### 7.2.2 Distribution overlay (Peak ΔT-AR)")
-        fig_mc_hist = create_monte_carlo_hist_overlay(
-            mc_results, metric="peak_ΔT",
-            title="Monte Carlo Distribution Overlay: Peak ΔT-AR (°C)",
-            x_label="Peak ΔT-AR (°C)"
-        )
-        st.plotly_chart(fig_mc_hist, config=PLOTLY_CONFIG, width='stretch')
-        st_figure_downloads(fig_mc_hist, "fig_mc_peak_ΔT_overlay")
-
-        st.markdown("#### 7.2.3 Monte Carlo convergence (running mean of Peak ΔT-AR)")
-        fig_mc_conv = create_monte_carlo_running_mean_chart(
-            mc_results, metric="peak_ΔT",
-            title="Monte Carlo Convergence: Running Mean of Peak ΔT-AR (°C)",
-            y_label="Running mean Peak ΔT-AR (°C)"
-        )
-        st.plotly_chart(fig_mc_conv, config=PLOTLY_CONFIG, width='stretch')
-        st_figure_downloads(fig_mc_conv, "fig_mc_peak_ΔT_convergence")
-
-        
-        # 7.4 Statistical Significance
-        st.markdown('<div class="subsection-header">7.3 Statistical Significance Testing</div>', unsafe_allow_html=True)
-        
-        stat_results = calculate_statistical_significance(mc_results)
-        
-        if stat_results:
-            st.markdown(f"""
-            **Welch's t-test: Energy-Only vs Multi-Objective (Peak ΔT-AR)**
-            
-            | Metric | Value |
-            |--------|-------|
-            | Sample Size | {stat_results['sample_size']} per group |
-            | Mean Difference | {stat_results['mean_difference']:.4f}°C |
-            | t-statistic | {stat_results['t_statistic']:.2f} |
-            | p-value | {stat_results['p_value']:.2e} |
-            | 95% CI | [{stat_results['ci_95'][0]:.4f}, {stat_results['ci_95'][1]:.4f}] |
-            | Cohen's d | {stat_results['cohens_d']:.2f} |
-            """)
-            
-            if stat_results['significant']:
-                st.markdown(f"""
-                <div class="success-box">
-                    <strong>✅ {stat_results['significance']}</strong><br>
-                    The difference in Peak ΔT-AR between Energy-Only and Multi-Objective routing 
-                    is statistically significant. We can confidently reject the null hypothesis 
-                    that they perform equally.
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.warning(f"⚠️ {stat_results['significance']}")
-    
-    # ========================================================================
-    # SECTION 8: SENSITIVITY ANALYSIS
-    # ========================================================================
-    
-    progress_bar.progress(85, text="Running sensitivity analysis...")
-    
-    st.markdown('<div class="section-header">📈 SECTION 8: Sensitivity Analysis</div>', unsafe_allow_html=True)
-    st.markdown("*How do results change when key parameters varyΔ*")
-    
-    # 8.1 Temperature Sensitivity
-    st.markdown("Run temperature sensitivity to see how strategies perform across different temperatures.")
-    
-    run_temp = st.button("🌡️ Run Temperature Sensitivity Analysis", key="run_temp_sens_btn")
-    
-    if run_temp:
-        with st.spinner("Running temperature sensitivity analysis..."):
-            temp_range = list(range(15, 45, 5))
-            temp_sensitivity = {'x': temp_range, 'y': {s: [] for s in results.keys()}}
-            
-            progress = st.progress(0)
-            for idx, temp_offset in enumerate(temp_range):
-                progress.progress((idx + 1) / len(temp_range))
-                
-                # Create modified weather
-                modified_weather = {}
-                for dc_name, weather in weather_data.items():
-                    modified_weather[dc_name] = {
-                        'temperature': temp_offset,
-                        'humidity': weather['humidity'],
-                        'wind_speed': weather['wind_speed']
-                    }
-                
-                temp_results = run_simulation(
-                    active_datacenters, modified_weather, user_location,
-                    num_requests, cooling_selections, energy_multiplier, ai_models
-                )
-                
-                for strategy in results.keys():
-                    temp_sensitivity['y'][strategy].append(temp_results[strategy]['totals']['peak_ΔT'])
-            
-            progress.empty()
-            st.session_state.temp_sensitivity = temp_sensitivity
-            st.success("✅ Temperature sensitivity analysis complete!")
-    
-    # Display results if they exist
-    if st.session_state.temp_sensitivity is not None:
-        fig_temp_sens = create_sensitivity_temperature_chart(st.session_state.temp_sensitivity)
-        st.plotly_chart(fig_temp_sens, config=PLOTLY_CONFIG, width='stretch')
-        
-        st.markdown("""
-        **Finding:** Energy-Only strategy becomes increasingly worse as ambient temperatures rise, 
-        while Multi-Objective routing remains more stable across temperature variations.
-        """)
-    else:
-        st.info("👆 Click the button above to run temperature sensitivity analysis")
-
-    
-    # 8.2 Latency Threshold Sensitivity
-    st.markdown('<div class="subsection-header">8.2 Latency Threshold Impact (Graph #14)</div>', unsafe_allow_html=True)
-    
-    latency_analysis = []
-    for threshold in [50, 75, 100, 125, 150, 175, 200]:
-        eligible_count = sum(1 for dc in dc_details.values() if dc['latency'] <= threshold)
-        latency_analysis.append({
-            'Threshold (ms)': threshold,
-            'Eligible DCs': eligible_count,
-            'Status': '✅ Balanced' if eligible_count >= 2 else '⚠️ Limited' if eligible_count == 1 else '❌ None'
-        })
-    
-    st.dataframe(pd.DataFrame(latency_analysis), width='stretch', hide_index=True)
-    
-    st.markdown("""
-    **Finding:** Lower latency thresholds naturally prevent Cold DC concentration by excluding 
-    distant datacenters, but may limit optimization opportunities.
-    """)
-    
-    # ========================================================================
-    # SECTION 9: WHAT-IF SCENARIOS
-    # ========================================================================
-    
-    st.markdown('<div class="section-header">🔄 SECTION 9: What-If Scenarios</div>', unsafe_allow_html=True)
-    st.markdown("*Compare different datacenter configurations*")
-    
-    st.markdown('<div class="subsection-header">9.1 Create Alternative Scenario</div>', unsafe_allow_html=True)
-    
-    # Alternative DC selection
-    all_dc_options = list(DEFAULT_DATACENTERS.keys()) + list(EXTENDED_DC_LOCATIONS.keys())
-    
-    alt_dcs = st.multiselect(
-        "Select datacenters for alternative scenario:",
-        options=all_dc_options,
-        default=[],
-        help="Choose a different set of datacenters to compare"
-    )
-    
-    if alt_dcs and len(alt_dcs) >= 1:
-        # Build alternative datacenter dict
-        alt_datacenters: dict[str, dict[str, Any]] = {}
-        alt_weather: dict[str, dict[str, Any]] = {}
-        alt_cooling: dict[str, str] = {}
-        
-        for dc_name in alt_dcs:
-            if dc_name in DEFAULT_DATACENTERS:
-                alt_datacenters[dc_name] = DEFAULT_DATACENTERS[dc_name]
-            else:
-                loc = EXTENDED_DC_LOCATIONS[dc_name]
-                weather = fetch_weather_data(loc['lat'], loc['lon'], dc_name)
-                temp = weather.get("temperature")
-                hum  = weather.get("humidity")
-                wind = weather.get("wind_speed")
-
-                if temp is None or hum is None or wind is None:
-                    st.warning(f"Weather missing for {dc_name}. Using defaults.")
-                    temp, hum, wind = 25.0, 60.0, 3.0
-                climate_info = classify_climate(weather['temperature'], weather['humidity'])
-                
-                alt_datacenters[dc_name] = {
-                    'lat': loc['lat'],
-                    'lon': loc['lon'],
-                    'region': loc['region'],
-                    'climate': climate_info['climate'],
-                    'default_cooling': climate_info['recommended_cooling'],
-                    'emoji': climate_info['emoji']
-                }
-            
-            dc_info = alt_datacenters[dc_name]
-            alt_weather[dc_name] = fetch_weather_data(dc_info['lat'], dc_info['lon'], dc_name)
-            alt_cooling[dc_name] = dc_info.get('default_cooling', 'air_economizer')
-        
-        run_scenario_btn = st.button("🔄 Run Scenario Comparison", key="run_scenario_btn")
-        
-        if run_scenario_btn:
-            with st.spinner("Running scenario comparison..."):
-                # Run simulation for alternative scenario
-                alt_results = run_simulation(
-                    alt_datacenters, alt_weather, user_location,
-                    num_requests, alt_cooling, energy_multiplier, ai_models
-                )
-                st.session_state.scenario_results = {
-                    'alt_results': alt_results,
-                    'alt_datacenters': alt_datacenters
-                }
-                st.success("✅ Scenario comparison complete!")
-        
-           # Display results if they exist
-        if st.session_state.scenario_results is not None and results is not None:
-            alt_results = st.session_state.scenario_results['alt_results']
-            
-            st.markdown('<div class="subsection-header">9.2 Scenario Comparison (Graph #16)</div>', unsafe_allow_html=True)
-            
-            # Compare Multi-Objective results
-            current_mo = results['Multi-Objective']
-            alt_mo = alt_results['Multi-Objective']
-         
-            comparison_df = pd.DataFrame([
-                {
-                    'Metric': 'Energy (Wh)',
-                    'Current': f"{current_mo['totals']['energy_wh']:.1f}",
-                    'Alternative': f"{alt_mo['totals']['energy_wh']:.1f}",
-                    'Change': f"{((alt_mo['totals']['energy_wh']/current_mo['totals']['energy_wh'])-1)*100:+.1f}%"
-                },
-                {
-                    'Metric': 'Peak ΔT-AR (°C)',
-                    'Current': f"{current_mo['totals']['peak_ΔT']:.2f}",
-                    'Alternative': f"{alt_mo['totals']['peak_ΔT']:.2f}",
-                    'Change': f"{((alt_mo['totals']['peak_ΔT']/current_mo['totals']['peak_ΔT'])-1)*100:+.1f}%"
-                },
-                {
-                    'Metric': 'Carbon (g)',
-                    'Current': f"{current_mo['totals']['carbon_g']:.1f}",
-                    'Alternative': f"{alt_mo['totals']['carbon_g']:.1f}",
-                    'Change': f"{((alt_mo['totals']['carbon_g']/current_mo['totals']['carbon_g'])-1)*100:+.1f}%"
-                }
-            ])
-            
-            st.dataframe(comparison_df, width='stretch', hide_index=True)
-            
-               # Visualization
-            fig_scenario = create_scenario_comparison_chart(
-                results['Multi-Objective'],
-                alt_results['Multi-Objective'],
-                "Current Configuration",
-                "Alternative Configuration"
-            )
-            if fig_scenario:
-                st.plotly_chart(fig_scenario, config=PLOTLY_CONFIG, width='stretch')
-        else:
-            st.info("👆 Click the button above to run scenario comparison")
-    
-    # ========================================================================
-    # SECTION 10: CARBON INTENSITY ANALYSIS
-    # ========================================================================
-    
-    st.markdown('<div class="section-header">⚡ SECTION 10: Carbon Intensity Analysis</div>', unsafe_allow_html=True)
-    st.markdown("*Time-of-day carbon intensity patterns by grid region*")
-    
-    # 10.1 24-Hour Curves
-    st.markdown('<div class="subsection-header">10.1 24-Hour Carbon Curves (Graph #17)</div>', unsafe_allow_html=True)
-    
-    fig_carbon = create_carbon_intensity_curves()
-    st.plotly_chart(fig_carbon, config=PLOTLY_CONFIG, width='stretch')
-    
-    # 10.2 Data Sources
-    st.markdown('<div class="subsection-header">10.2 Data Sources</div>', unsafe_allow_html=True)
-    
-    st.markdown("""
-    | Region | Source | Base Value |
-    |--------|--------|------------|
-    | California | CAISO Daily Renewables Watch | 0.22 kg/kWh |
-    | Arizona | EIA State Electricity Profile | 0.45 kg/kWh |
-    | Sweden | Swedish Energy Agency | 0.03 kg/kWh |
-    | Norway | NVE Statistics | 0.02 kg/kWh |
-    | Global Default | IEA World Energy Outlook | 0.40 kg/kWh |
-    """)
-    
-    # ========================================================================
-    # SECTION 11: COOLING TECHNOLOGY ANALYSIS
-    # ========================================================================
-    
-    st.markdown('<div class="section-header">🏭 SECTION 11: Cooling Technology Analysis</div>', unsafe_allow_html=True)
-    st.markdown("*Effectiveness of different cooling systems by climate*")
-    
-    # 11.1 Effectiveness Matrix
-    st.markdown('<div class="subsection-header">11.1 Cooling Effectiveness Matrix (Graph #18)</div>', unsafe_allow_html=True)
-    
-    fig_cooling_matrix = create_cooling_effectiveness_heatmap()
-    st.plotly_chart(fig_cooling_matrix, config=PLOTLY_CONFIG, width='stretch')
-    
-    st.markdown("""
-    **Legend:** ✓ = Optimal | ○ = Acceptable | ✗ = Not Recommended
-    
-    **Source:** Alkrush et al. (2024), International Journal of Refrigeration
-    """)
-    
-    # 11.2 PUE Comparison
-    st.markdown('<div class="subsection-header">11.2 PUE Comparison (Graph #19)</div>', unsafe_allow_html=True)
-    
-    fig_pue = create_pue_comparison_chart()
-    st.plotly_chart(fig_pue, config=PLOTLY_CONFIG, width='stretch')
-    
-    st.markdown("""
-    **Interpretation:** 
-    - PUE 1.0 = 100% of energy goes to IT (theoretical minimum)
-    - PUE 2.0 = 50% IT, 50% cooling overhead
-    - Lower PUE = More energy efficient
-    """)
-    
-    # ========================================================================
-    # SECTION 12: ACADEMIC REFERENCES
-    # ========================================================================
-    
-    progress_bar.progress(95, text="Finalizing...")
-    
-    st.markdown('<div class="section-header">📚 SECTION 12: Academic References</div>', unsafe_allow_html=True)
-    st.markdown("*Research sources used in this analysis*")
-    
-    st.markdown("""
-    <div class="reference-box">
-        <strong>Cooling & PUE:</strong><br>
-        Alkrush, A.A., Salem, M.S., Abdelrehim, O., & Hegazi, A.A. (2024). Data centers cooling: 
-        A critical review of techniques, challenges, and energy saving solutions. 
-        <em>International Journal of Refrigeration</em>, 160, 246-262.<br>
-        <a href="https://doi.org/10.1016/j.ijrefrig.2024.02.007">https://doi.org/10.1016/j.ijrefrig.2024.02.007</a>
-    </div>
-    
-    <div class="reference-box">
-        <strong>Energy per AI Prompt:</strong><br>
-        Stern, J. (2025). How Much Energy Does Your AI Prompt Use? I Went to a Data Center to Find Out. 
-        <em>Wall Street Journal</em>.<br>
-        Measurement: ~0.3 Wh per standard prompt
-    </div>
-    
-    <div class="reference-box">
-        <strong>Delta-T Aware Routing Calculation:</strong><br>
-        Physics-based heat flux model derived from urban energy balance principles.<br>
-        Formula: ΔT = α × (Q/A) × (1/(1 + β × wind))<br>
-        <small>Framework: Oke (1982), Sailor (2011). Validation: Yang et al. (2024) reports global ?T ~1.0°C</small>
-    </div>
-    
-    <div class="reference-box">
-        <strong>Carbon Emissions Methodology:</strong><br>
-        Luccioni, A.S., & Hernandez-Garcia, A. (2023). Counting Carbon: A Survey of Factors 
-        Influencing the Emissions of Machine Learning.<br>
-        Formula: C = E × I (Carbon = Energy × Intensity)
-    </div>
-    
-    <div class="reference-box">
-        <strong>Carbon Intensity Data:</strong><br>
-        • <strong>US States:</strong> EPA eGRID 2023 & EIA State Electricity Profiles 2024
-          <br><small style="color:#666;">→ Arizona: 0.42, California: 0.20, Texas: 0.38, Florida: 0.42 kg CO₂/kWh</small><br>
-        • <strong>California:</strong> CAISO Real-Time Emissions (2024)
-          <br><a href="https://www.caiso.com/todaysoutlook/Pages/emissions.html">caiso.com/todaysoutlook</a><br>
-        • <strong>Nordic:</strong> Ember Climate & EEA (2024)
-          <br><small style="color:#666;">→ Sweden: 0.03, Norway: 0.02, Finland: 0.08, Iceland: 0.01 kg CO₂/kWh</small><br>
-        • <strong>Europe:</strong> EEA Greenhouse Gas Intensity Indicator (2024)
-          <br><a href="https://www.eea.europa.eu">eea.europa.eu</a><br>
-        • <strong>Global:</strong> IEA World Energy Outlook (2024)
-          <br><a href="https://www.iea.org">iea.org</a>
-    </div>
-    
-    <div class="reference-box">
-        <strong>Weather Data:</strong><br>
-        Open-Meteo API (2024). Free Weather API.<br>
-        <a href="https://open-meteo.com/">https://open-meteo.com/</a>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # ========================================================================
-    # SECTION 13: EXECUTIVE SUMMARY & EXPORT
-    # ========================================================================
-    
-    st.markdown('<div class="section-header">📋 SECTION 13: Executive Summary</div>', unsafe_allow_html=True)
-    st.markdown("*Key findings and report export*")
-    
-    # Key Findings
-    st.markdown('<div class="subsection-header">13.1 Key Findings</div>', unsafe_allow_html=True)
-    
-    # Calculate dynamic findings
-    energy_only_metrics = results['Energy-Only']['totals']
-    multi_obj_metrics = results['Multi-Objective']['totals']
-    
-    ΔT_reduction = ((energy_only_metrics['peak_ΔT'] - multi_obj_metrics['peak_ΔT']) / 
-                     energy_only_metrics['peak_ΔT'] * 100) if energy_only_metrics['peak_ΔT'] > 0 else 0
-    cv_reduction = ((energy_only_metrics['heat_cv'] - multi_obj_metrics['heat_cv']) / 
-                    energy_only_metrics['heat_cv'] * 100) if energy_only_metrics['heat_cv'] > 0 else 0
-    energy_overhead = ((multi_obj_metrics['energy_wh'] - energy_only_metrics['energy_wh']) / 
-                       energy_only_metrics['energy_wh'] * 100)
-    
-    # Find concentration
-    eo_dist = results['Energy-Only']['distribution']
-    max_dc_eo = max(eo_dist, key=eo_dist.get)
-    max_pct_eo = (eo_dist[max_dc_eo] / sum(eo_dist.values())) * 100
-    
-    # Calculate model variance from R² scores
-    model_r2_values = [r['r2'] for r in model_results.values() if isinstance(r, dict) and 'r2' in r and r['r2'] > 0]
-    model_variance_pct = (max(model_r2_values) - min(model_r2_values)) * 100 if len(model_r2_values) > 1 else 0.0
-    
-    st.markdown(f"""
-    <div class="finding-card">
-        <h4>Finding 1: ΔT-AR aware AI Prompt Routing</h4>
-        <p>Energy-only routing concentrated <strong>{max_pct_eo:.1f}%</strong> of traffic at 
-        <strong>{max_dc_eo.split(',')[0]}</strong>, creating:</p>
-        <ul>
-            <li>Peak ΔT-AR contribution: <strong>+{energy_only_metrics['peak_ΔT']:.4f}°C</strong></li>
-            <li>Heat concentration (CV): <strong>{energy_only_metrics['heat_cv']:.3f}</strong></li>
-        </ul>
-        <p><em>This defeats sustainability goals by creating localized thermal hotspots.</em></p>
-    </div>
-    
-    <div class="finding-card">
-        <h4>Finding 2: Multi-Objective Routing Solution</h4>
-        <p>Balancing energy, latency, carbon, and ΔT-AR achieved:</p>
-        <ul>
-            <li>✅ <strong>{ΔT_reduction:.1f}%</strong> reduction in Peak ΔT-AR</li>
-            <li>✅ <strong>{cv_reduction:.1f}%</strong> reduction in Heat Concentration</li>
-            <li>⚠️ Only <strong>{energy_overhead:.1f}%</strong> energy overhead</li>
-        </ul>
-        {'<p><strong>Statistical significance:</strong> p < 0.001 (Monte Carlo validated)</p>' if enable_monte_carlo else ''}
-    </div>
-    
-    <div class="finding-card">
-        <h4>Finding 3: Routing Strategy > AI Algorithm</h4>
-        <p>Impact comparison:</p>
-        <ul>
-            <li>AI model choice (MLR vs ANN vs Bayesian): ~{model_variance_pct:.1f}% variance in predictions</li>
-            <li>Routing strategy choice: ~{ΔT_reduction:.0f}% variance in ΔT-AR metrics</li>
-        </ul>
-        <p><strong>Conclusion:</strong> Routing strategy selection has significantly larger impact
-        on sustainability outcomes than AI algorithm choice.</p>
-    </div>
-    
-    <div class="finding-card">
-        <h4>Finding 4: Physics Principle Validated</h4>
-        <p><em>"Cooling technology moves heat from datacenter interior to exterior environment. 
-        The heat doesn't disappear — it dissipates locally."</em></p>
-        <p>Cooling systems (PUE 1.10-1.80) determine the magnitude of external heat load. 
-        Routing strategy determines WHERE this heat is concentrated.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Export Options
-    st.markdown('<div class="subsection-header">13.2 Export Options</div>', unsafe_allow_html=True)
-    
-    if FPDF_AVAILABLE:
-        pdf_data = create_pdf_report(results, final_rec)
-        if pdf_data:
-            st.download_button(
-                label="📄 Download PDF Report",
-                data=bytes(pdf_data),
-                file_name=f"Delta-T-AR_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                mime="application/pdf",
-                help="Download a complete PDF report with metrics and recommendations"
-            )
-    else:
-        st.warning(
-            "⚠️ PDF Export Unavailable\n\n"
-            "To enable PDF export, please install the `fpdf` library:\n"
-            "```bash\n"
-            "pip install fpdf\n"
-            "```"
-        )
-    
-    # Create export dataframe
-    export_data = []
-    for strategy, data in results.items():
-        row = {'Strategy': strategy}
-        row.update({k: v for k, v in data['totals'].items()})
-        export_data.append(row)
-    
-    export_df = pd.DataFrame(export_data)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        csv = export_df.to_csv(index=False)
-        st.download_button(
-            label="📊 Download Results CSV",
-            data=csv,
-            file_name="ΔT_simulation_results.csv",
-            mime="text/csv"
-        )
-    
-    with col2:
-        # Create summary text
-        summary_text = f"""
-ΔT-AR AI Routing for Sustainable Datacenters
-Executive Summary
-Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-CONFIGURATION:
-- User Location: {st.session_state.user_label} ({user_location[0]:.4f}, {user_location[1]:.4f})
-- Datacenters: {', '.join(selected_dc_names)}
-- Total Requests: {num_requests:,}
-- Latency Threshold: {latency_threshold}ms
-
-KEY FINDINGS:
-1. DC Concentration Problem: Energy-only routing sent {max_pct_eo:.1f}% to {max_dc_eo}
-2. ΔT-AR Reduction: {ΔT_reduction:.1f}% with Multi-Objective routing
-3. Heat CV Reduction: {cv_reduction:.1f}%
-4. Energy Overhead: {energy_overhead:.1f}%
-
-RECOMMENDATION: {final_rec['recommended_strategy']}
-
-METRICS SUMMARY:
-{export_df.to_string()}
-        """
-        
-        st.download_button(
-            label="📋 Download Summary Report",
-            data=summary_text,
-            file_name="ΔT_executive_summary.txt",
-            mime="text/plain"
-        )
-    
-    progress_bar.progress(100, text="✅ Simulation complete!")
-    
 if __name__ == "__main__":
     main()
