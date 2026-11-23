@@ -1,6 +1,50 @@
+# Local research outputs and private runner scripts.
 /uhi_batch_runner.py
 /uhi_paper_experiments.py
-/uhi_paper_experiments.py
-/datacenter_api_calls.log
-/uhi_focused_analysis.py
-/saved_runs
+/saved_runs/
+/uhi_results_*/
+
+# Python environments, bytecode, and tooling caches.
+/.venv*/
+venv/
+env/
+**/__pycache__/
+*.py[cod]
+/.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ty_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Database credentials and local environment files (at any directory depth).
+.env
+.env.*
+!.env.example
+!.env.*.example
+.streamlit/secrets.toml
+.streamlit/secrets.toml.*
+.streamlit/secrets.*.toml
+!.streamlit/secrets.example.toml
+.pgpass
+.pg_service.conf
+
+# Generated runtime data. Keep local models so reruns do not retrain.
+/.cache.sqlite*
+*.log
+/artifacts/*.joblib
+
+# Workspace-local tooling and generated Node output.
+/.tools/
+/node_modules/
+/dist/
+/build/
+/.neon
+
+# Licensed Aptos files are installed locally, never redistributed in Git.
+/static/fonts/*.ttf
+
+# Operating-system metadata.
+.DS_Store
+Thumbs.db
