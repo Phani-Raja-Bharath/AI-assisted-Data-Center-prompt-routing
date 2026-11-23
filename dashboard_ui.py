@@ -19,6 +19,7 @@ from provenance import provenance_rows, reference_markdown, recommendation_markd
 from model_store import ModelStore, training_config, bundle_from_suite, restore_suite, get_or_train_bundle
 from temperature_display import fahrenheit, temperature_text, dual_temperature_axes
 from weather_strip import render_weather_strip
+from analysis_guidance import analysis_context, analyses_overview
 
 PALETTE = ["#176b62", "#c17b45", "#6f7b9b"]
 VIEWS = ["Overview", "Routing", "Models", "Experiments"]
@@ -342,6 +343,7 @@ def overview(a, settings, datacenters, weather, results, model_origin=None):
     if results:
         st.caption(tr(f"Models ready: {model_origin}. Simulation runs reuse these models."))
         st.subheader(tr("All routing strategies"))
+        analysis_context("routing")
         definitions = {
             "Energy (Wh)": "Energy: saved-model prediction, aggregated by allocated requests.",
             "Carbon (g)": "Emissions: deterministic energy × modeled grid intensity calculation.",
@@ -392,6 +394,7 @@ def overview(a, settings, datacenters, weather, results, model_origin=None):
 
 def routing_view(a, settings, datacenters, weather, results):
     st.subheader(tr("Routing comparison"))
+    analysis_context("routing")
     st.caption(tr("Compare service coverage alongside energy, emissions, and thermal impact."))
     st.dataframe(localized_dataframe(metrics_table(results)), width="stretch", hide_index=True)
     left, right = st.columns(2)
@@ -415,15 +418,18 @@ def routing_view(a, settings, datacenters, weather, results):
                     st.rerun()
         st.caption(tr("Exact PUE settings are scenario assumptions; the cited review provides cooling context."))
     with st.expander(tr("Carbon Intensity Analysis")):
+        analysis_context("carbon")
         display_plot(a.create_carbon_intensity_curves(datacenters), "routing_carbon", 330)
         st.dataframe(localized_dataframe(conditions_table(a, datacenters, weather)), width="stretch", hide_index=True)
     with st.expander(tr("Cooling Technology Analysis")):
+        analysis_context("cooling")
         st.caption(tr("The cooling matrix is a qualitative scenario assumption, not a measured ranking extracted from the cited review."))
         display_plot(a.create_cooling_effectiveness_heatmap(), "routing_cooling", 330)
         display_plot(a.create_pue_comparison_chart(), "routing_pue", 300)
 
 
 def models_view(a, suite, bundle):
+    analysis_context("models")
     best_name, _ = suite.get_best_model()
     st.caption(tr(f"Trained: {bundle['trained_at']} | Samples: {suite.training_samples:,}"))
     st.caption(tr("Historical API weather; formula-generated energy targets") if suite.training_source == "real" else
@@ -454,6 +460,7 @@ def experiments_view(a, settings, datacenters, weather, suite, results):
                         help=tr("Choose a sampled uncertainty analysis, a temperature sweep, or an alternative datacenter configuration. Each runs only when its action button is pressed."))
     key = st.session_state.sim_key
     if tool == "Monte Carlo":
+        analysis_context("monte_carlo")
         st.caption(tr("Monte Carlo analysis runs only when requested."))
         st.caption(tr("Monte Carlo samples weather and demand. Intervals describe simulated variability, not measurement uncertainty; new analyses may differ."))
         if st.button(tr("Run Monte Carlo analysis"), key="run_monte_carlo_btn", disabled=not settings.enable_monte_carlo):
@@ -473,11 +480,14 @@ def experiments_view(a, settings, datacenters, weather, suite, results):
         with right:
             display_plot(a.create_monte_carlo_boxplots(data), "mc_box", 390)
         stats = a.calculate_statistical_significance(data)
+        analysis_context("statistics")
         st.markdown(executive_results_markdown(results, stats, is_spanish()))
         with st.expander(tr("Distribution and convergence")):
+            analysis_context("convergence")
             display_plot(a.create_monte_carlo_hist_overlay(data, metric="peak_ΔT"), "mc_distribution", 330)
             display_plot(a.create_monte_carlo_running_mean_chart(data, metric="peak_ΔT"), "mc_convergence", 330)
     elif tool == "Temperature sensitivity":
+        analysis_context("temperature")
         if st.button(tr("🌡️ Run Temperature Sensitivity Analysis"), key="run_temp_sensitivity"):
             temperatures = list(range(0, 46, 3))
             values = {strategy: [] for strategy in results}
@@ -493,6 +503,7 @@ def experiments_view(a, settings, datacenters, weather, suite, results):
         if st.session_state.get("temp_sensitivity"):
             display_plot(a.create_sensitivity_temperature_chart(st.session_state.temp_sensitivity), "temperature_analysis", 430)
     else:
+        analysis_context("scenario")
         names = st.multiselect(tr("Select datacenters for alternative scenario:"), list(settings.catalog),
                                max_selections=3, key="scenario_datacenters",
                                help=tr("Choose up to three alternative sites to compare with the current configuration using the same demand, constraints, and saved prediction model."))
@@ -563,6 +574,7 @@ def render_dashboard(namespace):
             with st.popover(tr("Sources and methodology")):
                 st.dataframe(pd.DataFrame(provenance_rows(is_spanish())), hide_index=True, width="stretch")
                 st.markdown(reference_markdown(is_spanish()))
+            analyses_overview()
     weather_slot = st.container(key="header_weather")
     view = st.segmented_control(tr("Workspace"), VIEWS, default="Overview", key="dashboard_view",
                                 format_func=localized_formatter(), label_visibility="collapsed", width="stretch") or "Overview"

@@ -10,6 +10,16 @@ import streamlit as st
 # Keep model identifiers, equations, units, place names, and bibliographic titles.
 # Long phrases take precedence; one substitution pass avoids translating twice.
 SPANISH = {
+    "Why this matters": "Importancia del análisis",
+    "Why these analyses matter": "Importancia de estos análisis",
+    "Purpose": "Finalidad", "Method": "Método", "Interpretation and limits": "Interpretación y limitaciones",
+    "These analyses support comparisons within the simulation; they do not establish measured performance at operating datacenters.": "Estos análisis permiten comparar resultados dentro de la simulación; no establecen el rendimiento medido de centros de datos en operación.",
+    "About Monte Carlo analysis": "Acerca del análisis de Monte Carlo",
+    "Monte Carlo checks how robust routing strategies are when weather and demand vary.": "Monte Carlo evalúa la robustez de las estrategias de enrutamiento ante variaciones de las condiciones meteorológicas y la demanda.",
+    "It runs repeated trials with perturbed temperature, humidity, wind, pressure, solar radiation, and request volume. Each trial evaluates the strategies using saved prediction models, without retraining.": "Ejecuta realizaciones repetidas con perturbaciones de temperatura, humedad, viento, presión, radiación solar y volumen de solicitudes. Cada realización evalúa las estrategias mediante los modelos predictivos guardados, sin volver a entrenarlos.",
+    "Use it to examine whether modeled heat reductions persist across scenarios, how energy and thermal results vary, and whether improvements depend on particular conditions.": "Permite examinar si las reducciones del impacto térmico modelado persisten entre escenarios, cómo varían los resultados energéticos y térmicos, y si las mejoras dependen de condiciones específicas.",
+    "Distributions show the spread of simulated outcomes. Confidence intervals summarize uncertainty in estimated means across these trials; they are not prediction intervals for individual outcomes or uncertainty bounds for field measurements.": "Las distribuciones muestran la dispersión de los resultados simulados. Los intervalos de confianza resumen la incertidumbre de las medias estimadas a partir de estas realizaciones; no son intervalos de predicción para resultados individuales ni límites de incertidumbre de mediciones de campo.",
+    "Conclusions depend on the chosen perturbations and modeling assumptions. This analysis assesses variability within the simulation; it does not validate performance against measurements from operating datacenters.": "Las conclusiones dependen de las perturbaciones seleccionadas y de los supuestos del modelo. Este análisis evalúa la variabilidad dentro de la simulación; no valida el rendimiento mediante mediciones de centros de datos en operación.",
     "Pressure (hPa)": "Presión (hPa)",
     "Solar radiation (W/m²)": "Radiación solar (W/m²)",
     "New simulation completed": "Nueva simulación finalizada",
