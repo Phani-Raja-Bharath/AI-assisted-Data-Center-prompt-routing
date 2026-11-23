@@ -94,6 +94,33 @@ def get_carbon_data(region):
             "scope": region}
 
 
+def local_solar_hour(lon, now=None):
+    """Local mean solar hour (0-23) at a longitude: UTC hour + longitude / 15.
+
+    Each site's time-of-day carbon pattern (solar dip, evening peak) follows its own sun, so a
+    datacenter is evaluated at its local hour, not the server's clock. Solar time can differ
+    from civil time-zone hours by about an hour; the carbon curves are hourly approximations.
+    """
+    now = now or datetime.now(timezone.utc)
+    utc_hours = now.hour + now.minute / 60
+    return int((utc_hours + float(lon) / 15.0) // 1) % 24
+
+
+def carbon_snapshot(datacenters, at_utc=None):
+    """Freeze each site's carbon inputs at one instant: its local solar hour, the grid baseline
+    and the resulting intensity (kg CO2e/kWh). Routing, reporting and later analyses use these
+    recorded values, so results do not drift with the clock after the simulation ran."""
+    at_utc = at_utc or datetime.now(timezone.utc)
+    snapshot = {}
+    for name, info in datacenters.items():
+        region = info.get("region", "default")
+        hour = local_solar_hour(info["lon"], at_utc)
+        snapshot[name] = {"region": region, "local_solar_hour": hour,
+                          "baseline_kg_per_kwh": get_carbon_data(region)["base_kg_per_kwh"],
+                          "intensity_kg_per_kwh": float(get_carbon_intensity(region, hour))}
+    return {"at_utc": at_utc.isoformat(), "sites": snapshot}
+
+
 def get_carbon_intensity(region, hour=None):
     """
     Get carbon intensity for a region with time-of-day variation.

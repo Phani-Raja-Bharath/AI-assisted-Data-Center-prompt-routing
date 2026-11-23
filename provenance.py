@@ -20,26 +20,69 @@ def executive_results_markdown(results, statistics=None, spanish=False):
         data = result["totals"]
         rows.append(f"| {names.get(name, name)} | {data['served_requests']:,} / {data['offered_requests']:,} | "
                     f"{data['energy_wh']:.2f} | {data['carbon_g']:.2f} | {temperature_text(data['peak_ΔT'], difference=True, precision=6)} |")
-    if statistics:
-        label = "Prueba de Welch sobre las realizaciones de Monte Carlo" if spanish else "Welch test on Monte Carlo realizations"
+    if statistics and statistics.get("comparisons"):
+        rows += ["", _comparison_markdown(statistics, names, spanish)]
+    elif statistics:
+        label = "Prueba sobre las realizaciones de Monte Carlo" if spanish else "Test on Monte Carlo realizations"
         scope = "describe la simulación; no constituye validación de campo" if spanish else "describes the simulation; not field validation"
         rows += ["", f"{label}: p = {statistics['p_value']:.6g}; {scope}."]
     return "\n\n".join(rows[:2]) + "\n" + "\n".join(rows[2:])
 
 
+def _dz(comparison, spanish):
+    """Paired effect size, or an explicit note when it is undefined (identical differences)."""
+    if comparison.get("cohens_dz") is None:
+        return "no definido (todas las diferencias son idénticas)" if spanish else "undefined (all differences identical)"
+    return f"{comparison['cohens_dz']:+.2f}"
+
+
+def _comparison_markdown(statistics, names, spanish):
+    """One line per paired comparison: effect size and win rate first, corrected p-value last."""
+    reference = names.get(statistics["reference"], statistics["reference"])
+    if spanish:
+        lines = [f"**Comparaciones pareadas de Monte Carlo (máximo ΔT-AR, {reference} frente a cada estrategia)**: "
+                 "prueba de rangos con signo de Wilcoxon por ejecución, con corrección de Holm. "
+                 "Los valores p simulados disminuyen al aumentar el número de ejecuciones; priorice el tamaño del efecto. "
+                 "Describe la simulación; no constituye validación de campo."]
+    else:
+        lines = [f"**Paired Monte Carlo comparisons (peak ΔT-AR, {reference} vs each strategy)**: "
+                 "Wilcoxon signed-rank test per run, Holm-corrected. Simulated p-values shrink as runs are added; "
+                 "read the effect size first. Describes the simulation; not field validation."]
+    for name, c in statistics["comparisons"].items():
+        label = names.get(name, name)
+        lower = f"{c['reference_lower_share']:.0%}"
+        caveat = ""
+        if c.get("unserved_runs"):
+            caveat = (" Algunas ejecuciones dejaron solicitudes sin atender, lo que reduce el calor por ese motivo."
+                      if spanish else " Some runs left requests unserved, which lowers heat for that reason alone.")
+        if spanish:
+            lines.append(f"- frente a {label}: diferencia mediana {c['median_difference']:+.3g} °C; d_z = {_dz(c, spanish)}; "
+                         f"menor en {lower} de {c['n_runs']} ejecuciones; p (Holm) = {c['p_holm']:.3g}.{caveat}")
+        else:
+            lines.append(f"- vs {label}: median difference {c['median_difference']:+.3g} °C; d_z = {_dz(c, spanish)}; "
+                         f"lower in {lower} of {c['n_runs']} runs; p (Holm) = {c['p_holm']:.3g}.{caveat}")
+    return "\n".join(lines)
+
+
 def recommendation_markdown(recommendation, spanish=False):
     """Describe the actual selection criterion and calculated differences neutrally."""
+    if not recommendation.get("feasible", True):
+        reason = recommendation.get("binding_constraint", "")
+        if spanish:
+            return ("### Ninguna estrategia factible\n\nNinguna estrategia atiende solicitudes en este escenario. "
+                    f"Límite determinante: {reason}.")
+        return f"### No feasible strategy\n\nNo strategy serves any request in this scenario. Binding limit: {reason}."
     name = recommendation["recommended_strategy"]
     values = recommendation["improvements"]
     if spanish:
         name = {"Random": "Aleatoria", "Energy-Only": "Solo energía", "Heat-Only": "Solo impacto térmico", "Multi-Objective": "Multiobjetivo"}.get(name, name)
         title = "Estrategia recomendada para este escenario"
-        criterion = "La selección prioriza las estrategias que atienden toda la carga y, entre ellas, el menor máximo ΔT-AR modelado. Si ninguna atiende toda la carga, se prioriza el mayor número de solicitudes atendidas."
+        criterion = "La estrategia aleatoria es solo una referencia y no se recomienda. Entre las demás, se consideran las que atienden más solicitudes dentro del límite de latencia y se elige la más cercana al mejor valor en energía, emisiones, latencia y máximo ΔT-AR a la vez (brecha media respecto del mejor, con pesos iguales)."
         note = "Diferencias calculadas respecto de Solo energía; no son efectos medidos ni una demostración de superioridad general. En las reducciones, un signo positivo indica una disminución; en las variaciones de latencia y energía, un signo positivo indica un aumento."
         labels = ["Reducción del máximo ΔT-AR", "Reducción del CV de la disipación térmica", "Variación de la latencia", "Variación del consumo energético"]
     else:
         title = "Recommended strategy for this scenario"
-        criterion = "Selection prioritizes strategies serving the full workload, then the lowest modeled peak ΔT-AR. If none serves the full workload, the highest served-request count takes priority."
+        criterion = "Random is a reference baseline and is never recommended. Among the other strategies, those serving the most requests within the latency limit are compared, and the one closest to the best value on energy, emissions, latency and peak ΔT-AR at once is selected (average gap to the best, equal weights)."
         note = "Calculated differences relative to Energy-Only; these are not measured effects or proof of general superiority. Positive reductions indicate a decrease; positive latency and energy changes indicate an increase."
         labels = ["Peak ΔT-AR reduction", "Heat-dissipation CV reduction", "Latency change", "Energy consumption change"]
     keys = ["ΔT_reduction_pct", "cv_reduction_pct", "latency_change_pct", "energy_overhead_pct"]
@@ -59,7 +102,7 @@ def provenance_rows(spanish=False):
             ["Intensidad de carbono de las demás regiones", "Valores de referencia configurados como supuestos del escenario", "Constantes estáticas; variación horaria modelada", "Los valores de cada región figuran en la tabla de fuentes. Las referencias aportan contexto; la aplicación no verifica su extracción exacta ni consulta una API eléctrica para estas regiones."],
             [f"Energía base: {BASE_ENERGY_WH} Wh/solicitud; PUE: {pue}", "Supuestos del modelo para el análisis comparativo", "Constantes del escenario; no mediciones del hardware utilizado", "Alkrush et al. (2024) proporciona contexto sobre refrigeración. Los PUE específicos y la energía base se declaran como supuestos, no como valores medidos o validados por esa publicación."],
             ["ΔT: coeficiente 0.0012; factor de viento 0.15; área 1 km²", "Indicador térmico simplificado y no calibrado", "Supuestos utilizados en la simulación", "No constituye una predicción validada de la temperatura urbana. La conversión de energía a flujo térmico presupone un intervalo de una hora."],
-            ["Latencia: procesamiento 30 ms; propagación 200000 km/s; servicio 1000 solicitudes/s", "Supuestos analíticos de propagación y colas M/M/1", "La utilización se aproxima mediante la fracción de solicitudes asignadas", "No son mediciones de red. Se emplean para comparar escenarios bajo las mismas hipótesis."],
+            ["Latencia: procesamiento 30 ms; propagación 200000 km/s; servicio 1000 solicitudes/s", "Supuestos analíticos de propagación y colas M/M/1", "Utilización = tasa de solicitudes del sitio durante el lote de una hora (solicitudes / 3600 s) dividida por la tasa de servicio; cada sitio se limita al 99 % de ella", "No son mediciones de red. Se emplean para comparar escenarios bajo las mismas hipótesis."],
             ["Predicciones energéticas y resultados estadísticos", "Resultados calculados a partir de datos y supuestos", "Dependientes de la configuración, del modelo y de las realizaciones de Monte Carlo", "Las etiquetas energéticas del entrenamiento se generan mediante fórmulas, incluso cuando la meteorología procede de una API. Los intervalos y las pruebas estadísticas describen la simulación, no una validación experimental de campo."],
         ]
     else:
@@ -71,7 +114,7 @@ def provenance_rows(spanish=False):
             ["Other regional carbon intensities", "Configured scenario assumptions", "Static constants with modeled hourly variation", "Actual regional values appear in the source table. References provide context; exact source-table extraction is not verified here, and these regions do not use a live electricity API."],
             [f"Base energy: {BASE_ENERGY_WH} Wh/request; PUE: {pue}", "Model assumptions for comparative analysis", "Scenario constants; not measurements of the hardware in use", "Alkrush et al. (2024) provides cooling context. The exact PUE settings and base energy are declared assumptions, not values measured or validated by that publication."],
             ["ΔT: coefficient 0.0012; wind factor 0.15; area 1 km²", "Simplified, uncalibrated thermal indicator", "Assumptions used for simulation", "Not a validated urban-temperature forecast. Converting energy to heat flux assumes a one-hour interval."],
-            ["Latency: processing 30 ms; propagation 200000 km/s; service 1000 requests/s", "Analytical propagation and M/M/1 queue assumptions", "Utilization approximated by the allocated share of requests", "Not measured network performance; used to compare scenarios under the same assumptions."],
+            ["Latency: processing 30 ms; propagation 200000 km/s; service 1000 requests/s", "Analytical propagation and M/M/1 queue assumptions", "Utilization = the site's request rate over the one-hour batch (requests / 3,600 s) divided by the service rate; sites are capped at 99% of it", "Not measured network performance; used to compare scenarios under the same assumptions."],
             ["Energy predictions and statistical results", "Calculated analysis outputs", "Depend on configuration, model, and Monte Carlo realizations", "Training energy labels come from formulas even when weather is API-sourced. Confidence intervals and tests describe the simulation, not field validation."],
         ]
     if spanish:

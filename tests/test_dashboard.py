@@ -39,12 +39,18 @@ def test_dashboard_reuses_models_and_retrains_only_on_request(monkeypatch, tmp_p
     capacity = next(s for s in at.slider if s.label == "Max share per site (%)")
     capacity.set_value(50).run(timeout=30)
     assert not at.exception and calls == ["mlr"]
+    assert at.session_state["sim_key"] == previous_key
+    assert at.session_state["sim_inputs_changed"]
+    at.button(key="run_sim_btn").click().run(timeout=30)
     assert at.session_state["sim_key"] != previous_key
+    previous_receipt = at.session_state["sim_receipt"]
     # Diagnostics and explicit retraining now live in the Models workspace.
     at.segmented_control(key="dashboard_view").set_value("Models").run(timeout=30)
     at.button(key="retrain_models_btn").click().run(timeout=30)
     assert not at.exception and calls == ["mlr", "mlr"]
     assert next(iter(at.session_state["model_bundles"].values()))["revision"] != revision
+    assert at.session_state["sim_receipt"] == previous_receipt
+    assert at.session_state["sim_inputs_changed"]
     # A new browser session must load the saved bundle before training.
     fresh = AppTest.from_string("import ai_assisted_datacenter_allocation as app\napp.main()")
     fresh.run(timeout=30)

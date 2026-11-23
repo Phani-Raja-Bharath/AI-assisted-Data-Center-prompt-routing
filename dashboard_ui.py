@@ -1,5 +1,5 @@
 """Focused dashboard views over the existing research/simulation backend."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from copy import deepcopy
 import hashlib
 import inspect
@@ -20,7 +20,8 @@ from streamlit.errors import StreamlitSecretNotFoundError
 
 from localization import tr, is_spanish, localized_formatter, localized_dataframe, localized_figure
 from provenance import provenance_rows, reference_markdown, recommendation_markdown, executive_results_markdown
-from model_store import ModelStore, training_config, bundle_from_suite, restore_suite, get_or_train_bundle
+from model_store import (ModelStore, training_config, bundle_from_suite, restore_suite, get_or_train_bundle,
+                         DEFAULT_TRAINING_PERIOD)
 from temperature_display import fahrenheit, temperature_text, dual_temperature_axes
 from weather_strip import render_weather_table, weather_sources
 from analysis_guidance import analysis_context, guidance, GUIDANCE
@@ -142,21 +143,96 @@ def display_plot(figure, key, height=360):
     for annotation in figure.layout.annotations or []:
         annotation.font.size = 12
         annotation.font.family = "Aptos"
+    # A legend placed inside the plot area covers data and tick labels at dashboard size;
+    # move it to a single row just above the plot.
+    legend = figure.layout.legend
+    if not is_map and legend.x is not None and legend.y is not None and 0 <= legend.x <= 1 and 0 <= legend.y <= 1:
+        figure.update_layout(legend=dict(orientation="h", x=0, xanchor="left", y=1.02, yanchor="bottom"))
     for trace in figure.data:
         # Tile-map labels render with the map's own glyph fonts; Aptos would make them disappear.
         if hasattr(trace, "textfont") and trace.type != "scattermap":
             trace.textfont.size = 11
             trace.textfont.family = "Aptos"
+        # Unnamed bars would hover as "trace 1"; show the category and value instead.
+        if trace.type == "bar" and not trace.name and not trace.hovertemplate:
+            trace.hovertemplate = ("%{y}: %{x:.4g}" if trace.orientation == "h" else "%{x}: %{y:.4g}") + "<extra></extra>"
     st.plotly_chart(figure, key=key, width="stretch", config={
         "displaylogo": False, "responsive": True,
         "toImageButtonOptions": {"format": "png", "scale": 3, "width": 1600, "height": 900},
     })
 
 
+TRAIN_ALL_CHOICE = "Train All & Compare (Recommended)"
+
+
+def _confirm_train_all():
+    # Runs in a callback, so it may set the model selector before that widget is drawn again.
+    st.session_state.update(confirm_train_all=False, train_all_now=True, ui_radio_3521=TRAIN_ALL_CHOICE)
+
+
+def train_all_confirmation():
+    """Warning shown before training all models; training starts only on Confirm."""
+    with st.container(key="train_all_confirm"):
+        st.warning(tr("Retrains all three models. Takes about 15 minutes; the app is unavailable meanwhile."), icon=":material/warning:")
+        with st.container(horizontal=True, gap="small"):
+            st.button(tr("Confirm: train all models"), type="primary", key="train_all_confirm_btn",
+                      icon=":material/model_training:", on_click=_confirm_train_all)
+            st.button(tr("Cancel"), key="train_all_cancel_btn",
+                      on_click=lambda: st.session_state.update(confirm_train_all=False))
+
+
+EARLIEST_TRAINING_DATE = date(2021, 1, 1)  # start of the Open-Meteo historical forecast archive used here
+MIN_TRAINING_DAYS = 30
+
+
+def _training_minutes(start, end, choice):
+    """Rough training time, scaled from the measured 4-year, all-models run (~15 min)."""
+    years = max((end - start).days + 1, 1) / 365.25
+    per_year = {"all": 3.7, "ann": 1.2, "bayesian": 2.5, "mlr": 0.3}
+    mode = ("all" if "All" in choice else "mlr" if "MLR" in choice else "ann" if "ANN" in choice else "bayesian")
+    return max(1, round(per_year[mode] * years))
+
+
+def period_retrain_panel(settings):
+    """Pick a historical weather period and retrain on it; training starts only after confirming."""
+    start_default, end_default = (date.fromisoformat(value) for value in active_training_period())
+    latest = date.today() - timedelta(days=2)  # archive lags by about a day
+    with st.container(key="period_retrain", border=True):
+        st.markdown(f"**{tr('Retrain with a new data period')}**")
+        st.caption(tr("Active training period: {start} to {end}. Simulations use models trained on this period.").format(
+            start=start_default.isoformat(), end=end_default.isoformat()))
+        chosen = st.date_input(tr("Training weather period"), value=(start_default, min(end_default, latest)),
+                               min_value=EARLIEST_TRAINING_DATE, max_value=latest, key="training_period_input",
+                               help=tr("Weather used for training. Longer periods take longer."))
+        valid = isinstance(chosen, (tuple, list)) and len(chosen) == 2
+        if valid and (chosen[1] - chosen[0]).days + 1 < MIN_TRAINING_DAYS:
+            st.caption(tr("Choose at least {days} days so the models see enough weather variation.").format(days=MIN_TRAINING_DAYS))
+            valid = False
+        with st.container(horizontal=True, gap="small"):
+            if st.button(tr("Retrain with this period"), key="retrain_period_btn", icon=":material/date_range:",
+                         disabled=not valid):
+                st.session_state.confirm_period = (chosen[0].isoformat(), chosen[1].isoformat())
+            if active_training_period() != tuple(DEFAULT_TRAINING_PERIOD):
+                st.button(tr("Use default period (2021 to 2024)"), key="default_period_btn",
+                          on_click=lambda: st.session_state.update(training_period=DEFAULT_TRAINING_PERIOD))
+        pending = st.session_state.get("confirm_period")
+        if pending:
+            start, end = (date.fromisoformat(value) for value in pending)
+            st.warning(tr("Retrains {model} on {start} to {end}. Takes about {minutes} min; the app is unavailable meanwhile.").format(
+                model=tr(settings.model_choice), start=pending[0], end=pending[1],
+                minutes=_training_minutes(start, end, settings.model_choice)), icon=":material/warning:")
+            with st.container(horizontal=True, gap="small"):
+                st.button(tr("Confirm: retrain on this period"), type="primary", key="confirm_period_btn",
+                          on_click=lambda: st.session_state.update(training_period=pending, confirm_period=None,
+                                                                   retrain_period_now=True))
+                st.button(tr("Cancel"), key="cancel_period_btn",
+                          on_click=lambda: st.session_state.update(confirm_period=None))
+
+
 def experiment_controls(a):
     with st.container(key="experiment_panel"):
         st.markdown(f"**{tr('Simulation settings')}**")
-        origin, sites, workload, action = st.columns([1.25, 2.6, 1.35, .85], vertical_alignment="bottom", gap="medium")
+        origin, sites, workload, action = st.columns([1.2, 2.45, 1.3, 1.55], vertical_alignment="bottom", gap="medium")
         # Second row: every other setting visible as a regular input, styled like the top row.
         (lat_col, lon_col, latency_col, capacity_col, multiplier_col,
          model_col, runs_col, mc_col) = st.columns([.9, .9, 1.1, 1.1, 1.1, 1.55, 1.05, 1.5],
@@ -181,9 +257,11 @@ def experiment_controls(a):
                      help=tr("Sets the request origin used to calculate distance and modeled latency. This is not a datacenter location."))
         with lat_col:
             lat = st.number_input(tr("Latitude"), key="user_lat_input", format="%.4f",
+                                  min_value=-90.0, max_value=90.0,
                                   help=tr("Request-origin latitude in decimal degrees: north is positive, south is negative."))
         with lon_col:
             lon = st.number_input(tr("Longitude"), key="user_lon_input", format="%.4f",
+                                  min_value=-180.0, max_value=180.0,
                                   help=tr("Request-origin longitude in decimal degrees: east is positive, west is negative."))
         st.session_state.user_lat, st.session_state.user_lon = lat, lon
 
@@ -192,20 +270,20 @@ def experiment_controls(a):
         with sites:
             selected = st.multiselect(tr("Choose 1–3 datacenters"), list(catalog), default=defaults,
                                   max_selections=3, key="ui_multiselect_3238",
-                                  help=tr("Choose the candidate sites among which requests can be allocated. Each site has its own weather, cooling selection, and regional carbon baseline."))
+                                  help=tr("Candidate sites for routing."))
         st.session_state.selected_dcs = selected
         with workload:
             requests = st.slider(tr("Total Requests"), 100, 10000, 1000, 100, key="ui_slider_3454",
-                             help=tr("Number of AI requests offered in this simulated batch, not requests per second. Constraints may leave some requests unserved; compare served counts alongside energy and emissions."))
+                             help=tr("Requests in one simulated hour, not requests per second."))
         with latency_col:
             latency = st.slider(tr("Latency limit (ms)"), 50, 200, 100, 10, key="ui_slider_3463",
-                                help=tr("Maximum modeled latency enforced by Multi-Objective routing. Other strategies are comparison baselines and may exceed it. Latency is calculated, not measured."))
+                                help=tr("Applies to every strategy. Requests over the limit are unserved."))
         with capacity_col:
             share = st.slider(tr("Max share per site (%)"), 10, 100, 100, 5, key="ui_slider_site_share",
-                              help=tr("Largest share of the batch any one datacenter may receive. 100% means no limit. Lower values force strategies to spread load (limiting heat concentration); if the selected sites cannot absorb the whole batch, the remainder is reported as unserved."))
+                              help=tr("Most of the requests one site can take. 100% means no limit."))
         with multiplier_col:
             multiplier = st.slider(tr("Energy multiplier"), .5, 2., 1., .1, key="ui_slider_3478",
-                                   help=tr("Scales energy per request: 1.0 uses the model output, 2.0 doubles it, and 0.5 halves it. This scenario assumption also affects calculated emissions, heat, and capacity."))
+                                   help=tr("Scales energy per request (1.0 = model output)."))
         model_names = {"Train All & Compare (Recommended)": "All models (recommended)",
                        "Multiple Linear Regression (MLR) only": "MLR only",
                        "Artificial Neural Network (ANN) only": "ANN only",
@@ -217,17 +295,26 @@ def experiment_controls(a):
                 "Artificial Neural Network (ANN) only",
                 "Bayesian Optimization only" if a.BAYES_AVAILABLE else "Bayesian (Not Available)"],
                 key="ui_radio_3521", format_func=localized_formatter(lambda option: model_names.get(option, option)),
-                help=tr("Selects the saved model configuration to reuse. Training occurs only if that configuration has no compatible saved bundle, or after explicit retraining. Train All compares MLR, ANN, and Bayesian-optimized ANN when available."))
+                help=tr("Model used for predictions. Trains only if no saved model matches."))
         with runs_col:
             runs = st.slider(tr("Monte Carlo runs"), 20, 500, 100, 20, key="ui_slider_3490",
-                             help=tr("Number of sampled simulation trials with varied weather and demand. More trials take longer; intervals describe simulated variability, not field-measurement uncertainty."))
+                             help=tr("Number of sampled trials. More runs take longer."))
         with mc_col:
             monte_carlo = st.checkbox(tr("Enable Monte Carlo Analysis"), value=True, key="ui_checkbox_3487",
                                      help=tr("Enables the Monte Carlo action in Experiments. Checking this box does not start analysis or retrain a model."))
-        with action:
-            run = st.button(tr("Run simulation"), type="primary", width="stretch", key="run_sim_btn",
+        # Both actions share one slot: a compact Run simulation and Train all models beside it.
+        actions = action.container(horizontal=True, horizontal_alignment="right", gap="small")
+        with actions:
+            run = st.button(tr("Run simulation"), type="primary", width="content", key="run_sim_btn",
                         icon=":material/play_arrow:",
-                        help=tr("Recalculates routing for the current settings using compatible saved models. The Random baseline can change because its allocation is sampled."))
+                        help=tr("Recalculate routing with the current settings."))
+        with actions:
+            # Only asks for confirmation; nothing trains until the warning below is confirmed.
+            st.button(tr("Train all models"), width="content", key="train_all_btn", icon=":material/model_training:",
+                      on_click=lambda: st.session_state.update(confirm_train_all=True),
+                      help=tr("Retrain MLR, ANN and Bayesian ANN."))
+        if st.session_state.get("confirm_train_all"):
+            train_all_confirmation()
     return SimpleNamespace(catalog=catalog, selected=selected, user_location=(lat, lon),
                            num_requests=requests, latency_threshold=latency,
                            max_dc_capacity_mw=100, max_site_share=share / 100, energy_multiplier=multiplier,
@@ -256,7 +343,7 @@ def weather_panel(a, settings, displayed_weather):
         st.markdown(f"**{tr('Datacenter conditions')}**", width="stretch")
         refresh = st.button(tr("Refresh weather"), key="refresh_weather_btn", width="content",
                             type="tertiary", icon=":material/refresh:",
-                            help=tr("Fetch current conditions for the selected datacenters now. Reuses saved models; the provider's valid-at time may remain unchanged."))
+                            help=tr("Fetch current weather now."))
     if refresh:
         for name in settings.selected:
             info = settings.catalog[name]
@@ -278,23 +365,35 @@ def weather_panel(a, settings, displayed_weather):
                             "label": detail_labels.get(climate["climate_detail"], climate["climate"].title()),
                             "cooling_name": cooling["name"], "cooling_icon": cooling["icon"], "pue": cooling["pue"]}
     st.session_state.dashboard_weather = deepcopy(latest)
-    label = localized_formatter(lambda code: f"{a.COOLING_SYSTEMS[code]['icon']} {a.COOLING_SYSTEMS[code]['name']}")
-    options = {code: label(code) for code in a.COOLING_SYSTEMS}
-    updated = render_weather_table(latest, indicators, dict(st.session_state.cooling_selections), options)
+    updated = dict(st.session_state.cooling_selections)
+    for column, name in zip(st.columns(len(settings.selected)), settings.selected):
+        with column:
+            updated[name] = st.selectbox(f"{tr('Cooling technology')} · {name}", list(a.COOLING_SYSTEMS),
+                index=list(a.COOLING_SYSTEMS).index(updated[name]), key=f"cooling_select_{name}",
+                format_func=localized_formatter(lambda code: f"{a.COOLING_SYSTEMS[code]['icon']} {a.COOLING_SYSTEMS[code]['name']}"),
+                help=tr("Press Run simulation to apply."))
     if updated != st.session_state.cooling_selections:
         st.session_state.cooling_selections = updated
-        st.session_state.force_sim_rerun = True
         st.rerun()
+    with st.expander(tr("Weather readings"), expanded=not bool(st.session_state.get("sim_results"))):
+        render_weather_table(latest, indicators, updated)
 
 
-def ready_models(a, choice, retrain):
+def active_training_period():
+    """Weather period of the models simulations use: the default, or one confirmed on the Models tab."""
+    return tuple(st.session_state.get("training_period", DEFAULT_TRAINING_PERIOD))
+
+
+def ready_models(a, choice, retrain, period=None):
     mode = ("all" if "All" in choice else "mlr" if "MLR" in choice else
             "ann" if "ANN" in choice else "bayesian" if a.BAYES_AVAILABLE else "mlr")
     source = (inspect.getsource(a.AIModelSuite) + inspect.getsource(a.classify_climate)
               + inspect.getsource(a.collect_historical_training_data)
               + Path(a.energy_model.__file__).read_text(encoding="utf-8")
               + json.dumps({"default": a.DEFAULT_DATACENTERS, "extended": a.EXTENDED_DC_LOCATIONS}, sort_keys=True))
-    config = training_config(mode, hashlib.sha256(source.encode()).hexdigest(), a.FEATURE_NAMES, a.COOLING_TYPES)
+    period = tuple(period or active_training_period())
+    config = training_config(mode, hashlib.sha256(source.encode()).hexdigest(), a.FEATURE_NAMES, a.COOLING_TYPES,
+                             period=period)
     config["bayesian_available"] = a.BAYES_AVAILABLE
     try:
         secrets = st.secrets.to_dict()
@@ -305,6 +404,7 @@ def ready_models(a, choice, retrain):
 
     def train():
         suite = a.AIModelSuite()
+        suite.training_period = period
         with st.spinner(tr("Training selected models (only needed once per configuration)...")):
             suite.train_all(mode)
         return bundle_from_suite(suite, config)
@@ -316,6 +416,25 @@ def ready_models(a, choice, retrain):
     return restore_suite(a.AIModelSuite(), bundle), bundle, origin
 
 
+def frozen_carbon(a, datacenters):
+    """Carbon snapshot for this run. Reuses the last recorded snapshot while the hour-level carbon
+    pattern is unchanged, so navigation does not re-time results; otherwise records a new one."""
+    previous = st.session_state.get("sim_receipt", {}).get("inputs", {}).get("carbon")
+    snapshot = a.carbon_snapshot(datacenters)
+    if previous and previous.get("sites") == snapshot["sites"]:
+        return previous
+    return snapshot
+
+
+def carbon_inputs(snapshot=None):
+    """Keyword arguments that make a simulation use the recorded carbon snapshot."""
+    snapshot = snapshot or st.session_state.get("sim_receipt", {}).get("inputs", {}).get("carbon")
+    if not snapshot:
+        return {}
+    return {"carbon_intensities": {name: site["intensity_kg_per_kwh"] for name, site in snapshot["sites"].items()},
+            "carbon_time": datetime.fromisoformat(snapshot["at_utc"])}
+
+
 def simulation_results(a, settings, datacenters, weather, models, bundle):
     inputs = {"selected_dc_names": settings.selected, "num_requests": settings.num_requests,
               "cooling_selections": dict(st.session_state.cooling_selections),
@@ -324,21 +443,19 @@ def simulation_results(a, settings, datacenters, weather, models, bundle):
               "max_dc_capacity_mw": settings.max_dc_capacity_mw, "max_site_share": settings.max_site_share,
               "user_location": settings.user_location, "weather_data": weather,
               "datacenters": datacenters, "model_revision": bundle["revision"],
-              "carbon_hour": datetime.now().hour,
+              "model_choice": getattr(settings, "model_choice", None),
+              "origin_name": st.session_state.get("user_label"),
+              # Carbon inputs frozen once: reruns and later analyses reuse these exact values.
+              "carbon": frozen_carbon(a, datacenters),
               "carbon_baselines": {name: a.get_carbon_data(info.get("region", "default"))
                                    for name, info in datacenters.items()}}
     key = hashlib.md5(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
-    weather_trigger = st.session_state.pop("weather_refresh_trigger", None)
+    st.session_state.pop("weather_refresh_trigger", None)
     st.session_state.sim_executed_this_render = False
-    if (settings.run or st.session_state.get("force_sim_rerun") or
-            st.session_state.get("sim_key") != key or st.session_state.get("sim_results") is None):
-        previous = st.session_state.get("sim_receipt", {}).get("inputs", {})
-        trigger = ("Run simulation button" if settings.run else weather_trigger or
-                   ("Initial simulation" if not previous else
-                    "Prediction model changed" if previous.get("model_revision") != bundle["revision"] else
-                    "Weather inputs updated" if previous.get("weather_data") != weather else
-                    "Carbon profile hour changed" if previous.get("carbon_hour") != inputs["carbon_hour"] else
-                    "Simulation settings changed"))
+    st.session_state.sim_inputs_changed = (st.session_state.get("sim_key") != key
+                                           or st.session_state.get("simulation_pending_model", False))
+    if settings.run:
+        trigger = "Run simulation button"
         snapshot = deepcopy(inputs)
         started_at = datetime.now(timezone.utc).isoformat()
         clock_start = perf_counter()
@@ -346,7 +463,7 @@ def simulation_results(a, settings, datacenters, weather, models, bundle):
             datacenters, weather, settings.user_location, settings.num_requests,
             st.session_state.cooling_selections, settings.energy_multiplier, models,
             settings.latency_threshold, settings.max_dc_capacity_mw,
-                max_site_share=settings.max_site_share)
+                max_site_share=settings.max_site_share, **carbon_inputs(inputs["carbon"]))
         elapsed = perf_counter() - clock_start
         completed_at = datetime.now(timezone.utc).isoformat()
         receipt = {"run_id": uuid4().hex, "started_at_utc": started_at,
@@ -359,14 +476,17 @@ def simulation_results(a, settings, datacenters, weather, models, bundle):
                    "strategy_results": deepcopy({name: {"totals": data["totals"], "distribution": data["distribution"]}
                                                 for name, data in calculated.items()})}
         st.session_state.sim_results = calculated
+        st.session_state.sim_model_bundle = bundle
         st.session_state.sim_receipt = receipt
         st.session_state.sim_executed_this_render = True
         st.session_state.sim_key = key
+        st.session_state.sim_inputs_changed = False
+        st.session_state.simulation_pending_model = False
         st.session_state.force_sim_rerun = False
         st.session_state.temp_sensitivity = None
         st.session_state.scenario_results = None
         st.session_state.pop("mc_cache", None)
-    return st.session_state.sim_results
+    return st.session_state.get("sim_results")
 
 
 def execution_receipt(model_note=""):
@@ -387,7 +507,7 @@ def execution_receipt(model_note=""):
             st.write(f"{tr('Trigger')}: {tr(receipt['trigger'])}")
             st.write(f"{tr('Completed at')}: {completed}")
             st.caption(tr("Duration measures routing calculations only; weather retrieval and model loading or training are excluded."))
-            st.caption(tr("A new run ID is created only after all strategy calculations complete successfully. Navigation and language changes reuse the original receipt."))
+            st.caption(tr("Navigation and language changes reuse this receipt."))
             rows = []
             for name, current in receipt["inputs"]["weather_data"].items():
                 rows.append({"Datacenter": name, "Temperature (°C)": current["temperature"],
@@ -616,45 +736,51 @@ def sci_number(value, digits=3):
     return f"{mantissa:.{digits - 1}f} × 10{str(exponent).translate(SUPERSCRIPTS)}"
 
 
-def recommendation_reason(results, recommended):
-    """Plain-language 'why' for the recommendation, built from this run's numbers. It mirrors
-    generate_final_recommendation: serve the most demand, then lowest modeled peak ΔT-AR."""
-    totals = {name: data["totals"] for name, data in results.items()}
-    most_served = max(t.get("served_requests", 0) for t in totals.values())
-    eligible = sorted((name for name, t in totals.items() if t.get("served_requests", 0) == most_served),
-                      key=lambda name: totals[name]["peak_ΔT"])
-    excluded = [name for name in totals if name not in eligible]
-    best = totals[recommended]
-    served_text = (tr("serves all {n} requests").format(n=f"{most_served:,}") if not best.get("unserved_requests")
-                   else tr("serves the most requests ({n})").format(n=f"{most_served:,}"))
-    lines = [f"{tr('Why:')} **{tr(recommended)}** {served_text} " +
-             tr("and has the lowest modeled peak ΔT-AR ({value} °C) of the {count} strategies that do.").format(
-                 value=sci_number(best["peak_ΔT"]), count=len(eligible))]
-    runner_up = next((name for name in eligible if name != recommended), None)
+METRIC_LABELS = {"energy_wh": "energy", "carbon_g": "carbon", "avg_latency_ms": "latency", "peak_ΔT": "peak ΔT-AR"}
+
+
+def recommendation_reason(results, recommendation):
+    """Plain-language 'why', built from the scores generate_final_recommendation computed."""
+    recommended = recommendation["recommended_strategy"]
+    scores, gaps = recommendation["scores"], recommendation["gaps"]
+    candidates = sorted(recommendation["candidates"], key=lambda name: scores[name])
+    served = recommendation["served_requests"]
+    offered = results[recommended]["totals"].get("offered_requests", served)
+    served_text = (tr("all {n} requests").format(n=f"{served:,}") if served == offered
+                   else tr("{n} of {total} requests").format(n=f"{served:,}", total=f"{offered:,}"))
+    lines = [f"{tr('Why:')} " + tr("{name} has the best balance of energy, carbon, latency and peak ΔT-AR among {count} strategies serving {served} (average gap {gap}).").format(
+        count=len(candidates), served=served_text, name=f"**{tr(recommended)}**",
+        gap=f"{scores[recommended]:.1%}")]
+    behind = [f"{tr(METRIC_LABELS[m])} +{value:.1%}" for m, value in gaps[recommended].items() if value > 0.0005]
+    lines.append(tr("Gaps to the best: {list}.").format(list=", ".join(behind)) if behind
+                 else tr("It is the best candidate on every metric."))
+    runner_up = next((name for name in candidates if name != recommended), None)
     if runner_up:
-        gap = totals[runner_up]["peak_ΔT"] - best["peak_ΔT"]
-        relative = gap / best["peak_ΔT"] * 100 if best["peak_ΔT"] else 0
-        lines.append(tr("Next best: the {name} strategy at {value} °C ({pct} higher).").format(
-            name=f"**{tr(runner_up)}**", value=sci_number(totals[runner_up]["peak_ΔT"]), pct=f"{relative:.1f}%")
-            + (" " + tr("The difference is under 1%, so the two are effectively tied.") if relative < 1 else ""))
+        margin = scores[runner_up] - scores[recommended]
+        lines.append(tr("Next: {name} (average gap {gap}).").format(name=f"**{tr(runner_up)}**",
+                                                                     gap=f"{scores[runner_up]:.1%}")
+                     + (" " + tr("The two are within one percentage point, effectively tied.") if margin < 0.01 else ""))
     sites = results[recommended].get("datacenters", {})
     if sites:
         hottest = max(sites, key=lambda name: sites[name].get("ΔT_contribution", 0))
-        lines.append(tr("Its peak comes from {site}, which carries {share} of the traffic.").format(
+        lines.append(tr("Its peak heating is at {site}, which carries {share} of the traffic.").format(
             site=hottest, share=f"{sites[hottest].get('percentage', 0):.0f}%"))
-    if excluded:
-        lines.append(tr("Not considered because they left requests unserved:") + " " +
-                     ", ".join(f"{tr(name)} ({totals[name].get('unserved_requests', 0):,})" for name in excluded) + ".")
+    fewer = [name for name, why in recommendation["excluded"].items() if why == "fewer requests served"]
+    if fewer:
+        lines.append(tr("Not compared because they served fewer requests:") + " " + ", ".join(
+            f"{tr(name)} ({results[name]['totals'].get('unserved_requests', 0):,} {tr('unserved')})" for name in fewer) + ".")
+    lines.append(tr("Random is a reference baseline and is never recommended."))
     return lines
 
 
-def results_summary(results, recommended):
+def results_summary(results, recommendation):
     """Headline numbers for the recommended strategy, compared with the Energy-Only baseline."""
+    recommended = recommendation["recommended_strategy"]
     best = results[recommended]["totals"]
     base = results.get(BASELINE_STRATEGY, {}).get("totals")
     with st.container(key="results_summary", border=True):
         st.markdown(f"**{tr('Recommended:')} {tr(recommended)}** · "
-                    f"{tr('Selected by served demand, then modeled peak thermal impact.')}")
+                    f"{tr('Best balance of energy, carbon, latency and peak ΔT-AR.')}")
         # Where the recommended strategy sends the requests, largest share first.
         allocation = {name: count for name, count in results[recommended]["distribution"].items() if count}
         served = sum(allocation.values())
@@ -664,38 +790,74 @@ def results_summary(results, recommended):
             unserved = best.get("unserved_requests", 0)
             st.markdown(f":material/location_on: {tr('Where:')} {sites}"
                         + (f" · {tr('Unserved Requests')}: {unserved:,}" if unserved else ""))
-            st.caption(tr("The split depends on each site's weather, cooling technology and the energy model. "
-                          "Request volume, origin and the energy multiplier scale every site alike, so the "
-                          "percentages change only when weather (refreshed about hourly), cooling or the selected sites change."))
-        st.markdown(":material/lightbulb: " + " ".join(recommendation_reason(results, recommended)))
+            st.caption(tr("The split depends on the strategy, weather, cooling and limits."))
+        st.markdown(":material/lightbulb: " + " ".join(recommendation_reason(results, recommendation)))
         if recommended == BASELINE_STRATEGY:
             st.caption(tr("Energy-Only is also the comparison baseline, so no change percentages are shown."))
+        offered = best.get("offered_requests", best.get("served_requests", 0))
+        st.caption(tr("Totals for {name} over one simulated hour ({n} requests). Percentages compare with Energy-Only; lower is better.").format(
+            name=tr(recommended), n=f"{offered:,}"))
         for column, (label, field, fmt) in zip(st.columns(4), SUMMARY_METRICS):
             delta = None
             if base and recommended != BASELINE_STRATEGY and base[field]:
                 change = (best[field] - base[field]) / base[field] * 100
                 delta = f"{change:+.1f}% {tr('vs Energy-Only')}"
             value = sci_number(best[field]) if field == "peak_ΔT" else fmt.format(best[field])
-            column.metric(tr(label), value, delta=delta, delta_color="inverse")
+            column.metric(tr(label), value, delta=delta, delta_color="inverse",
+                          help=tr(METRIC_NOTES[label]) if label in METRIC_NOTES else None)
+
+
+STRATEGY_GUIDE = [
+    ("Random", ":material/shuffle:", "Splits requests at random.",
+     "Reference baseline for comparison; never recommended."),
+    ("Energy-Only", ":material/bolt:", "Favors the sites with the lowest predicted energy per request.",
+     "Each site's weight is (lowest energy ÷ its energy)³."),
+    ("Heat-Only", ":material/local_fire_department:", "Favors the site with the lowest temperature rise per request.",
+     "Each site's weight is (lowest rise ÷ its rise)³."),
+    ("ΔT-AR", ":material/thermostat:", "Splits requests so every site warms equally.",
+     "Minimizes the peak modeled temperature rise (ΔT-AR) across sites."),
+    ("Multi-Objective", ":material/balance:", "Scores each site on energy, latency, carbon and local heat.",
+     "Equal weights; favors the site with the best combined score."),
+]
+
+
+def strategy_guide():
+    """Short explanation of the five routing strategies, shown at the top of the Overview."""
+    with st.container(key="strategy_guide"):
+        st.markdown(f"**{tr('How the routing strategies work')}**")
+        for column, (name, icon, what, detail) in zip(st.columns(len(STRATEGY_GUIDE), gap="small"), STRATEGY_GUIDE):
+            with column:
+                st.markdown(f"{icon} **{tr(name)}**")
+                st.markdown(tr(what))
+                st.caption(tr(detail))
+        st.caption(tr("All strategies share the same weather, model and limits. Requests that can't be served are shown as unserved."))
 
 
 def overview(a, settings, datacenters, weather, results, model_origin=None):
+    strategy_guide()
     recommended = None
     if results:
-        recommended = a.generate_final_recommendation(results, settings.latency_threshold)["recommended_strategy"]
-        results_summary(results, recommended)
+        recommendation = a.generate_final_recommendation(results, settings.latency_threshold)
+        if recommendation.get("feasible", True):
+            recommended = recommendation["recommended_strategy"]
+            results_summary(results, recommendation)
+        else:
+            st.warning(tr("No strategy can serve any request.") + " " +
+                       tr("Binding limit: {limit}.").format(limit=tr(recommendation.get("binding_constraint", ""))) + " " +
+                       tr("Raise the latency limit, power capacity or share per site, choose closer datacenters, "
+                          "or move the request origin."), icon=":material/block:")
         st.subheader(tr("All routing strategies"))
         analysis_context("routing")
         show_metrics_table(results)
         st.caption(tr("Compare served and unserved requests before comparing energy, emissions, or thermal impact.") + " " +
-                   tr("Calculated simulation results. Fixed inputs, saved model, and carbon hour give repeatable values for non-random strategies; Random routing is sampled."))
+                   tr("Random routing is sampled; the other strategies repeat exactly for the same inputs."))
     else:
         st.caption(tr("Ready to compare. Use Run simulation above."))
 
     map_column, traffic_column = st.columns([2.1, 1], gap="medium")
     with map_column, st.container(key="routing_atlas"):
         st.subheader(tr("Request origin and datacenters"))
-        city = st.session_state.get("user_label", "")
+        city = getattr(settings, "origin_name", st.session_state.get("user_label", ""))
         origin_name = city if a.CITY_DATABASE.get(city) == settings.user_location else f"{settings.user_location[0]:.4f}, {settings.user_location[1]:.4f}"
         distribution = results[recommended]["distribution"] if recommended else {}
         per_site = results[recommended].get("datacenters", {}) if recommended else {}
@@ -703,10 +865,10 @@ def overview(a, settings, datacenters, weather, results, model_origin=None):
         display_plot(routing_map(datacenters, settings.user_location, distribution, origin_name, energy),
                      "overview_map", 420)
         if recommended:
-            st.caption(tr("Dark marker: request origin. Marker size, route width and percentage show each datacenter's share under the recommended strategy.") + " " +
-                       tr("Halo color shows modeled energy per request at each serving datacenter (pale = lower, red = higher)."))
+            st.caption(tr("Dark marker: request origin. Size and % show each site's share.") + " " +
+                       tr("Halo color: energy per request (pale = lower, red = higher)."))
         else:
-            st.caption(tr("Shared candidate locations for all strategies. Dark marker: request origin; lines show the candidate routes. Strategy allocations appear in the adjacent chart."))
+            st.caption(tr("Dark marker: request origin. Lines: candidate routes."))
     with traffic_column, st.container(key="allocation_panel"):
         st.subheader(tr("Traffic Distribution"))
         if results:
@@ -754,16 +916,43 @@ def routing_view(a, settings, datacenters, weather, results):
 
 
 def models_view(a, suite, bundle):
-    analysis_context("models")
     best_name, _ = suite.get_best_model()
-    st.caption(tr(f"Trained: {bundle['trained_at']} | Samples: {suite.training_samples:,}"))
-    st.caption(tr("Historical API weather; formula-generated energy targets") if suite.training_source == "real" else
-               tr("Synthetic weather and formula-generated energy targets"))
-    st.caption(tr("Validation scores compare model predictions with formula-generated targets, not measured hardware energy."))
+    with st.container(key="models_note", border=True):
+        st.markdown(f":material/model_training: **{tr('What the models do')}**")
+        st.markdown(tr("They predict energy per request (Wh) at each site from its weather and cooling. "
+                       "Routing, carbon and ΔT-AR all build on this prediction; the app uses {best}.").format(
+            best=f"**{best_name}**"))
+        st.caption((tr("Trained on real historical weather, but the energy labels come from the app's energy formula. "
+                       "The models are a surrogate of that formula, not measurements of real hardware.")
+                    if suite.training_source == "real" else
+                    tr("Trained on synthetic weather with energy labels from the app's energy formula. "
+                       "The models are a surrogate of that formula, not measurements of real hardware."))
+                   + f" {tr('Trained')}: {bundle['trained_at'][:16].replace('T', ' ')} UTC · "
+                     f"{suite.training_samples:,} {tr('samples')}.")
+    analysis_context("models")
     metrics = [{"Model": name, "Validation R²": value.get("val_r2"), "Test R²": value["r2"],
                 "Test MAE": value["mae"], "Test RMSE": value["rmse"]}
                for name, value in suite.metrics.items() if isinstance(value, dict) and "r2" in value]
     st.dataframe(localized_dataframe(pd.DataFrame(metrics)), width="stretch", hide_index=True)
+    # Cooling comparisons are validated separately: changing a site's cooling relies on the model
+    # ordering technologies correctly under the same weather, which overall R² does not measure.
+    checks = suite.metrics.get("cooling_validation")
+    st.markdown(f"**{tr('Cooling comparison check')}**")
+    if checks:
+        st.dataframe(localized_dataframe(pd.DataFrame([
+            {"Model": name, "Same order as formula": check["order_agreement"],
+             "Difference error (Wh/request)": check["delta_mae_wh"],
+             "Worst difference error (Wh/request)": check["delta_max_error_wh"],
+             "Weather samples": check["weather_samples"]} for name, check in checks.items()])),
+            width="stretch", hide_index=True, column_config={
+                tr("Same order as formula"): st.column_config.ProgressColumn(
+                    tr("Same order as formula"), format="percent", min_value=0, max_value=1,
+                    help=tr("Share of cooling pairs ranked the same way as the formula.")),
+                tr("Difference error (Wh/request)"): st.column_config.NumberColumn(format="%.4f"),
+                tr("Worst difference error (Wh/request)"): st.column_config.NumberColumn(format="%.4f")})
+        st.caption(tr("How often each model ranks cooling options the same way as the reference formula."))
+    else:
+        st.warning(tr("This saved model predates the cooling comparison check. Retrain the selected models to validate cooling comparisons."))
     left, right = st.columns(2)
     with left, st.container(key="chart_card_performance"):
         st.subheader(tr("Model Performance Comparison"))
@@ -773,7 +962,7 @@ def models_view(a, suite, bundle):
         display_plot(a.create_prediction_scatter(suite.metrics, best_name), "models_predictions", 360)
         total = len(suite.metrics.get(best_name, {}).get("y_test", []))
         if total > 4000:
-            st.caption(tr("Showing a fixed sample of {shown} of {total} test predictions so the chart stays responsive; R² uses all of them.").format(
+            st.caption(tr("Showing {shown} of {total} points; R² uses all.").format(
                 shown="4,000", total=f"{total:,}"))
     with st.expander(tr("Training diagnostics")):
         for name, function in [("learning", a.create_learning_curve_chart), ("bayes", a.create_bayesopt_convergence_chart)]:
@@ -784,20 +973,21 @@ def models_view(a, suite, bundle):
 
 
 def experiments_view(a, settings, datacenters, weather, suite, results):
+    cooling_selections = st.session_state.sim_receipt["inputs"]["cooling_selections"]
     tool = st.selectbox(tr("Analysis"), ["Monte Carlo", "Temperature sensitivity", "What-if scenario"],
                         key="experiment_tool", format_func=localized_formatter(),
-                        help=tr("Choose a sampled uncertainty analysis, a temperature sweep, or an alternative datacenter configuration. Each runs only when its action button is pressed."))
+                        help=tr("Each analysis runs only when you press its button."))
     key = st.session_state.sim_key
     if tool == "Monte Carlo":
         analysis_context("monte_carlo")
         st.caption(tr("Monte Carlo analysis runs only when requested."))
-        st.caption(tr("Monte Carlo samples weather and demand. Intervals describe simulated variability, not measurement uncertainty; new analyses may differ."))
+        st.caption(tr("Intervals show simulated variability, not measurement uncertainty."))
         if st.button(tr("Run Monte Carlo analysis"), key="run_monte_carlo_btn", disabled=not settings.enable_monte_carlo):
             with st.spinner(tr("Running Monte Carlo simulations...")):
                 data = a.run_monte_carlo(datacenters, weather, settings.user_location, settings.num_requests,
-                    st.session_state.cooling_selections, settings.energy_multiplier, suite,
+                    cooling_selections, settings.energy_multiplier, suite,
                     settings.n_runs, settings.latency_threshold, settings.max_dc_capacity_mw,
-                max_site_share=settings.max_site_share)
+                max_site_share=settings.max_site_share, **carbon_inputs())
             st.session_state.mc_cache = {"key": (key, settings.n_runs), "results": data}
         cache = st.session_state.get("mc_cache", {})
         if cache.get("key") != (key, settings.n_runs):
@@ -825,9 +1015,9 @@ def experiments_view(a, settings, datacenters, weather, suite, results):
                 for temperature in temperatures:
                     modified = {name: {**current, "temperature": temperature} for name, current in weather.items()}
                     evaluated = a.run_simulation(datacenters, modified, settings.user_location,
-                        settings.num_requests, st.session_state.cooling_selections, settings.energy_multiplier,
+                        settings.num_requests, cooling_selections, settings.energy_multiplier,
                         suite, settings.latency_threshold, settings.max_dc_capacity_mw,
-                max_site_share=settings.max_site_share)
+                max_site_share=settings.max_site_share, **carbon_inputs())
                     for strategy, result in evaluated.items():
                         values[strategy].append(result["totals"]["peak_ΔT"])
             st.session_state.temp_sensitivity = {"x": temperatures, "y": values}
@@ -837,7 +1027,7 @@ def experiments_view(a, settings, datacenters, weather, suite, results):
         analysis_context("scenario")
         names = st.multiselect(tr("Select datacenters for alternative scenario:"), list(settings.catalog),
                                max_selections=3, key="scenario_datacenters",
-                               help=tr("Choose up to three alternative sites to compare with the current configuration using the same demand, constraints, and saved prediction model."))
+                               help=tr("Compare up to three alternative sites under the same settings."))
         if st.button(tr("🔄 Run Scenario Comparison"), disabled=not names, key="run_scenario_btn"):
             alternatives, alternative_weather, cooling = {}, {}, {}
             for name in names:
@@ -850,7 +1040,7 @@ def experiments_view(a, settings, datacenters, weather, suite, results):
             evaluated = a.run_simulation(alternatives, alternative_weather, settings.user_location,
                 settings.num_requests, cooling, settings.energy_multiplier, suite,
                 settings.latency_threshold, settings.max_dc_capacity_mw,
-                max_site_share=settings.max_site_share)
+                max_site_share=settings.max_site_share, **carbon_inputs())
             st.session_state.scenario_results = {"key": key, "names": names, "alt_results": evaluated}
         scenario = st.session_state.get("scenario_results")
         if scenario and scenario["key"] == key and scenario["names"] == names:
@@ -897,9 +1087,9 @@ def help_page():
     start, sources, weather, analyses = st.tabs([tr("Getting started"), tr("Sources and methodology"),
                                                tr("Weather information"), tr("Analysis guide")])
     with start:
-        st.write(tr("Choose the request origin, up to three datacenters, and the request count in the horizontal controls. Set each site's cooling technology using the labeled dropdowns above the weather table."))
-        st.write(tr("Run simulation calculates all routing strategies. Saved prediction models are reused. The execution receipt records the run ID, timing, trigger, and exact input snapshot."))
-        st.write(tr("Use Overview for all strategies, Routing for detailed comparisons, Models for validation and explicit retraining, and Experiments for on-demand analyses."))
+        st.write(tr("Pick an origin, up to three datacenters and a request count. Set cooling per site in the conditions panel."))
+        st.write(tr("Run simulation compares all strategies using the saved models. The execution receipt records the inputs."))
+        st.write(tr("Overview: summary. Routing: detailed comparison. Models: validation and retraining. Experiments: extra analyses."))
     with sources:
         st.dataframe(pd.DataFrame(provenance_rows(is_spanish())), hide_index=True, width="stretch")
         st.markdown(reference_markdown(is_spanish()))
@@ -907,9 +1097,10 @@ def help_page():
         current = st.session_state.get("dashboard_weather", {})
         if current:
             st.dataframe(localized_dataframe(weather_sources(current)), hide_index=True, width="stretch")
-        st.write(tr("Automatic weather check every 5 minutes while this page is open. Refresh weather bypasses the app cache. Provider values may stay unchanged between 15-minute model time steps; assumed fallbacks are labeled."))
-        st.write(tr("Weather icons label the current thermal category, not observed sky conditions. Cold: below 10 °C [50 °F]; cool: 10–20 °C [50–68 °F]; moderate: 20–28 °C [68–82.4 °F]; hot: 28 °C [82.4 °F] or above. Upper bounds for cool and moderate are excluded. Humidity and wind also influence the cooling recommendation."))
-        st.caption(tr("The cooling icon shows the selected technology used for simulation. PUE values are fixed scenario assumptions, not measured facility efficiency."))
+        st.write(tr("Weather is checked every 5 minutes. Fallback values are labeled."))
+        st.write(tr("Results update only when you press Run simulation."))
+        st.write(tr("Icons show the temperature category: cold below 10 °C [50 °F], cool 10 to 20 °C, moderate 20 to 28 °C, hot 28 °C [82.4 °F] and above."))
+        st.caption(tr("PUE values are fixed assumptions, not measured efficiency."))
     with analyses:
         for key in GUIDANCE:
             title, purpose, method, limits = guidance(key)
@@ -942,7 +1133,7 @@ def render_dashboard(namespace):
 
     /* Cards: one surface, one border, one padding everywhere. */
     .st-key-experiment_panel, .st-key-header_weather, .st-key-routing_atlas,
-    .st-key-allocation_panel, .st-key-results_summary {
+    .st-key-allocation_panel, .st-key-results_summary, .st-key-strategy_guide, .st-key-models_note {
         background: light-dark(#ffffff, #121e22);
         border: 1px solid light-dark(#dbe5e8, #22343a); border-radius: 10px;
         padding: 1rem 1.15rem; box-shadow: 0 1px 2px rgba(0, 0, 0, .06); }
@@ -950,6 +1141,10 @@ def render_dashboard(namespace):
     [class*="st-key-chart_card"] { background: light-dark(#ffffff, #121e22);
         border: 1px solid light-dark(#dbe5e8, #22343a); border-radius: 10px; padding: 1rem 1.15rem; }
     [data-testid="stExpander"] details { background: light-dark(#ffffff, #121e22); }
+    /* Cards side by side share one height: each card grows to fill its column, and columns in
+       a row already stretch to the tallest one. */
+    [data-testid="stColumn"] > [data-testid="stVerticalBlock"] > [data-testid="stLayoutWrapper"]:has(
+        > [class*="st-key-chart_card"], > .st-key-routing_atlas, > .st-key-allocation_panel) { flex: 1 1 auto; }
     /* Coordinates are typed, not stepped: hide the +/- buttons so the full value fits. */
     .st-key-user_lat_input [data-testid^="stNumberInputStep"],
     .st-key-user_lon_input [data-testid^="stNumberInputStep"] { display: none; }
@@ -976,7 +1171,7 @@ def render_dashboard(namespace):
         with title, st.container(key="project_heading", gap="small"):
             st.title("AI-Assisted Datacenter Prompt Routing for ΔT-AR Mitigation")
             st.markdown("Demonstrating the usage of AI to mitigate localized heat concentration effect caused by datacenters")
-            st.caption("Phani Raja Bharath Balijepalli | University of Central Florida")
+            st.caption("Phani Raja Bharath Balijepalli | Urban Digital Twin Lab | University of Central Florida")
         with tools, st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center", gap="small"):
             st.toggle("Español", key="spanish_ui", help=tr("Switch between English and technical Spanish."))
             st.button(tr("Help"), key="open_help", on_click=open_help, icon=":material/help:")
@@ -993,34 +1188,53 @@ def render_dashboard(namespace):
         st.info(tr("Choose 1–3 datacenters"))
         return
     datacenters, weather = selected_conditions(a, settings)
-    # After a run, fold the conditions table into a one-line summary so results reach the
-    # first screen; it expands on click (cooling choices are still edited inside it).
-    after_run = settings.run or view != "Overview" or st.session_state.get("simulation_run")
     with weather_slot:
-        if after_run:
-            summary = " · ".join(f"{name.split(',')[0]} {current['temperature']:.1f} °C"
-                                 for name, current in weather.items())
-            with st.expander(f"{tr('Datacenter conditions')} · {summary}", icon=":material/thermostat:",
-                             key="conditions_expander"):
-                weather_panel(a, settings, weather)
-        else:
-            weather_panel(a, settings, weather)
-    if settings.run or view != "Overview":
-        st.session_state.simulation_run = True
+        weather_panel(a, settings, weather)
     retrain = False
     if view == "Models":
         st.subheader(tr("Saved prediction models"))
         retrain = st.button(tr("Retrain selected models"), key="retrain_models_btn",
                             help=tr("Replace the saved models for this training configuration."))
-        if retrain:
-            st.session_state.simulation_run = True
-    if not st.session_state.get("simulation_run"):
+    if view == "Models":
+        period_retrain_panel(settings)
+    retrain = retrain or st.session_state.pop("retrain_period_now", False)
+    retrained = None
+    train_all = st.session_state.pop("train_all_now", False)
+    if retrain or train_all:
+        started = perf_counter()
+        retrained = ready_models(a, TRAIN_ALL_CHOICE if train_all else settings.model_choice, True)
+        st.session_state.simulation_pending_model = True
+        if train_all:
+            st.success(tr("All models retrained and saved in {minutes} min. Press Run simulation to apply them to routing results.").format(
+                minutes=f"{(perf_counter() - started) / 60:.1f}"), icon=":material/check_circle:")
+        else:
+            st.info(tr("Retrained models are saved. Press Run simulation to apply them to routing results."))
+    if not settings.run and st.session_state.get("sim_results") is None:
+        if retrained:
+            models_view(a, retrained[0], retrained[1])
+            return
         if view == "Overview":
             overview(a, settings, datacenters, weather, None)
         else:
             st.info(tr("Run the experiment to populate this view."))
         return
-    suite, bundle, origin = ready_models(a, settings.model_choice, retrain)
+    if settings.run:
+        suite, bundle, origin = ready_models(a, settings.model_choice, False)
+        st.session_state.sim_model_origin = origin
+    else:
+        bundle = st.session_state.get("sim_model_bundle")
+        if bundle is None:
+            revision = st.session_state.get("sim_receipt", {}).get("model_revision")
+            bundle = next((item for item in st.session_state.get("model_bundles", {}).values()
+                           if item.get("revision") == revision), None)
+        if bundle is None:
+            st.info(tr("Run the experiment to populate this view."))
+            return
+        st.session_state.sim_model_bundle = bundle
+        suite = restore_suite(a.AIModelSuite(), bundle)
+        origin = "session"
+    if retrained:
+        suite, bundle, origin = retrained
     trained = datetime.fromisoformat(bundle["trained_at"]).strftime("%Y-%m-%d %H:%M UTC")
 
     def model_details():
@@ -1029,19 +1243,33 @@ def render_dashboard(namespace):
                         f"**{tr('Training samples')}:** {suite.training_samples:,} · "
                         f"**{tr('Saved model trained at')}:** {trained}")
             st.caption(tr(f"Models ready: {origin}. Simulation runs reuse these models."))
-            years = bundle.get("training_config", {}).get("years")
-            if suite.training_source == "real" and years:
-                st.markdown(f"**{tr('Requested historical weather window')}:** {years[0]}-01-01 {'a' if is_spanish() else 'to'} {years[-1]}-12-31")
-                st.caption(tr("This is the configured API request window. Exact returned dates and per-location coverage were not recorded in this saved artifact."))
+            period = bundle.get("training_config", {}).get("period")
+            if suite.training_source == "real" and period:
+                st.markdown(f"**{tr('Requested historical weather window')}:** {period[0]} {'a' if is_spanish() else 'to'} {period[1]}")
+                st.caption(tr("Requested download window; actual coverage per site was not recorded."))
             else:
                 st.caption(tr("Synthetic training data: no observed calendar date range applies."))
-            st.caption(tr("Energy targets were generated by formulas with added training noise; historical weather does not make them measured hardware energy."))
+            st.caption(tr("Energy targets come from formulas, not measured hardware."))
 
     # Keep the first screen for results: model details sit at the top only on the Models tab.
     if view == "Models":
         model_details()
     results = simulation_results(a, settings, datacenters, weather, suite, bundle)
-    execution_receipt(f"{tr('Prediction model')}: {suite.best_model_name}")
+    receipt = st.session_state.sim_receipt
+    execution_receipt(f"{tr('Prediction model')}: {receipt['prediction_model']}")
+    if st.session_state.sim_inputs_changed:
+        st.warning(tr("Inputs changed. Press Run simulation to update the results."),
+                   icon=":material/pending_actions:")
+    # Results, maps, comparisons, and analyses share the committed run snapshot.
+    applied = receipt["inputs"]
+    applied_settings = SimpleNamespace(**vars(settings))
+    for field in ("num_requests", "energy_multiplier", "latency_threshold", "max_dc_capacity_mw", "max_site_share", "user_location"):
+        setattr(applied_settings, field, applied[field])
+    applied_settings.selected = applied["selected_dc_names"]
+    applied_settings.origin_name = applied.get("origin_name", "")
+    settings = applied_settings
+    datacenters, weather = deepcopy(applied["datacenters"]), deepcopy(applied["weather_data"])
+    applied_suite = restore_suite(a.AIModelSuite(), st.session_state.sim_model_bundle)
     shortfalls = [f"{tr(name)} ({value['totals']['unserved_requests']:,})" for name, value in results.items()
                   if value["totals"]["unserved_requests"]]
     if shortfalls:
@@ -1054,7 +1282,7 @@ def render_dashboard(namespace):
     elif view == "Models":
         models_view(a, suite, bundle)
     else:
-        experiments_view(a, settings, datacenters, weather, suite, results)
+        experiments_view(a, settings, datacenters, weather, applied_suite, results)
     if view != "Models":
         model_details()
     recommendation = a.generate_final_recommendation(results, settings.latency_threshold)

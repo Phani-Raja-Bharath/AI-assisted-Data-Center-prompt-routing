@@ -34,13 +34,16 @@ def test_dashboard_views_reuse_models_and_defer_experiments(monkeypatch, tmp_pat
     at.selectbox(key="ui_radio_3521").set_value("Multiple Linear Regression (MLR) only").run()
     at.slider(key="ui_slider_3490").set_value(20)
     at.segmented_control(key="dashboard_view").set_value("Routing").run(timeout=30)
+    assert not at.exception and train_calls == []
+    assert "sim_receipt" not in at.session_state
+    at.button(key="run_sim_btn").click().run(timeout=30)
     assert not at.exception and train_calls == ["mlr"]
     # The receipt line names the prediction model; the training time is in the model details panel.
     assert any("Prediction model" in item.value and "New simulation completed" in item.value for item in at.caption)
     assert any("Saved model trained at" in item.value for item in at.markdown)
     assert any("Synthetic training data: no observed calendar date range applies." == item.value for item in at.caption)
     first_receipt = at.session_state["sim_receipt"]
-    assert first_receipt["trigger"] == "Initial simulation"
+    assert first_receipt["trigger"] == "Run simulation button"
     assert first_receipt["compute_duration_seconds"] >= 0
     assert first_receipt["strategies"] == list(at.session_state["sim_results"])
     at.button(key="run_sim_btn").click().run(timeout=30)
@@ -54,10 +57,14 @@ def test_dashboard_views_reuse_models_and_defer_experiments(monkeypatch, tmp_pat
     at.button(key="refresh_weather_btn").click().run(timeout=30)
     assert not at.exception and train_calls == ["mlr"] and not monte_carlo_calls
     assert cached.clear.call_count == 3
-    assert at.session_state["sim_key"] != previous
+    assert at.session_state["sim_key"] == previous
+    assert at.session_state["sim_receipt"] == manual_receipt
+    assert at.session_state["sim_inputs_changed"]
+    assert not at.session_state["sim_executed_this_render"]
+    at.button(key="run_sim_btn").click().run(timeout=30)
     weather_receipt = at.session_state["sim_receipt"]
     assert weather_receipt["run_id"] != manual_receipt["run_id"]
-    assert weather_receipt["trigger"] == "Manual weather refresh"
+    assert weather_receipt["trigger"] == "Run simulation button"
     assert all(value["temperature"] == 21. for value in weather_receipt["inputs"]["weather_data"].values())
     assert all(value["temperature"] == 20. for value in manual_receipt["inputs"]["weather_data"].values())
     key = at.session_state["sim_key"]
@@ -71,21 +78,29 @@ def test_dashboard_views_reuse_models_and_defer_experiments(monkeypatch, tmp_pat
     assert not any(widget.key == "dashboard_strategy" for widget in at.selectbox)
     comparison = next(frame.value for frame in at.dataframe if "Unserved Requests" in frame.value.columns)
     assert comparison["Strategy"].tolist() == list(at.session_state["sim_results"])
-    # Cooling is edited in the weather table; AppTest cannot edit data_editor cells, so set the
-    # resulting selection directly and verify the simulation and retention behaviour.
-    at.session_state["cooling_selections"] = {**at.session_state["cooling_selections"], "Phoenix, AZ": "liquid_cooling"}
-    at.run(timeout=30)
+    at.selectbox(key="cooling_select_Phoenix, AZ").set_value("liquid_cooling").run(timeout=30)
     assert not at.exception and train_calls == ["mlr"]
+    assert at.session_state["sim_receipt"] == weather_receipt
+    assert at.session_state["sim_inputs_changed"]
+    at.button(key="run_sim_btn").click().run(timeout=30)
     assert at.session_state["sim_receipt"]["run_id"] != weather_receipt["run_id"]
     assert at.session_state["sim_receipt"]["inputs"]["cooling_selections"]["Phoenix, AZ"] == "liquid_cooling"
     at.multiselect(key="ui_multiselect_3238").set_value(["Phoenix, AZ", "San Francisco, CA", "Dublin, Ireland"]).run(timeout=30)
     assert not at.exception and train_calls == ["mlr"]
     assert at.session_state["cooling_selections"]["Phoenix, AZ"] == "liquid_cooling"
     assert at.session_state["cooling_selections"]["Dublin, Ireland"] == "air_economizer"
-    editor = next(frame.value for frame in at.dataframe if "Cooling technology" in frame.value.columns)
-    assert editor.set_index("Datacenter")["Cooling technology"].to_dict() == at.session_state["cooling_selections"]
+    assert at.selectbox(key="cooling_select_Dublin, Ireland").value == "air_economizer"
     assert "Stockholm, Sweden" not in at.session_state["cooling_selections"]
+    assert "Stockholm, Sweden" in at.session_state["sim_receipt"]["inputs"]["cooling_selections"]
+    assert at.session_state["sim_inputs_changed"]
+    at.button(key="run_sim_btn").click().run(timeout=30)
     assert set(at.session_state["sim_receipt"]["inputs"]["cooling_selections"]) == {"Phoenix, AZ", "San Francisco, CA", "Dublin, Ireland"}
+    current_receipt = at.session_state["sim_receipt"]
+    at.selectbox(key="ui_radio_3521").set_value("Artificial Neural Network (ANN) only").run(timeout=30)
+    assert not at.exception and train_calls == ["mlr"]
+    assert at.session_state["sim_receipt"] == current_receipt
+    assert at.session_state["sim_inputs_changed"]
+    at.selectbox(key="ui_radio_3521").set_value("Multiple Linear Regression (MLR) only").run(timeout=30)
     at.segmented_control(key="dashboard_view").set_value("Experiments").run(timeout=30)
     at.button(key="run_monte_carlo_btn").click().run(timeout=30)
     assert not at.exception and monte_carlo_calls == [True]
@@ -117,7 +132,8 @@ def test_failed_simulation_does_not_issue_a_new_receipt(monkeypatch):
     state = State(cooling_selections={}, sim_receipt=old_receipt, sim_results=old_results)
     monkeypatch.setattr(dashboard_ui, "st", SimpleNamespace(session_state=state))
     backend = SimpleNamespace(run_simulation=Mock(side_effect=RuntimeError("calculation failed")),
-                              get_carbon_data=lambda region: {})
+                              get_carbon_data=lambda region: {},
+                              carbon_snapshot=lambda datacenters: {"at_utc": "2026-01-01T00:00:00+00:00", "sites": {}})
     settings = SimpleNamespace(selected=[], num_requests=1000, energy_multiplier=1.,
                                latency_threshold=100, max_dc_capacity_mw=100, max_site_share=1.0,
                                user_location=(0, 0), run=True)

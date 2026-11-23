@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import math
 import time
 from datetime import datetime, timedelta, timezone
 import plotly.graph_objects as go
@@ -26,15 +27,15 @@ from retry_requests import retry
 from typing import Any
 from streamlit.errors import StreamlitSecretNotFoundError
 from energy_model import (BASE_ENERGY_WH, ENERGY_PER_PROMPT_BASE, COOLING_SYSTEMS,
-                          COOLING_TYPES, FEATURE_NAMES, cooling_index,
+                          COOLING_TYPES, FEATURE_NAMES, MODEL_INPUT_NAMES, cooling_index, encode_features,
                           calculate_energy_per_request, calculate_ΔT_contribution,
                           surrogate_energy_target)
 from routing_core import allocate_requests, latency_request_capacity
 from model_store import (ModelStore, training_config, config_key, bundle_from_suite,
                          restore_suite, get_or_train_bundle)
-from network_model import haversine_distance, calculate_latency
-from carbon_model import CARBON_INTENSITY_BASE, get_carbon_intensity, get_carbon_data
-from routing_strategies import (route_random, route_energy_only, route_heat_only,
+from network_model import haversine_distance, calculate_latency, site_utilization
+from carbon_model import CARBON_INTENSITY_BASE, get_carbon_intensity, get_carbon_data, local_solar_hour, carbon_snapshot
+from routing_strategies import (latency_caps_for, energy_map, route_random, route_energy_only, route_heat_only,
                                 route_ΔT_aware, route_multi_objective)
 import inspect
 import energy_model
@@ -313,8 +314,11 @@ def create_pdf_report(results, final_rec):
     pdf.cell(0, 10, '1. Executive Summary', border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", size=11)
     
+    feasible = final_rec.get('feasible', True) and final_rec.get('recommended_strategy')
+    headline = (f"Recommended Strategy: {final_rec['recommended_strategy']}" if feasible
+                else "No feasible strategy: no requests could be served.")
     summary_text = (
-        f"Recommended Strategy: {final_rec['recommended_strategy']}\n\n"
+        f"{headline}\n\n"
         f"Reasoning:\n" + 
         "\n".join([f"- {r.replace('✅', '[OK]').replace('⚠️', '[WARN]').replace('❌', '[X]').replace('🌡️', '').replace('🔥', '').replace('⏱️', '').replace('⚡', '').replace('Δ', 'Delta')}" for r in final_rec['reasoning']])
     )
@@ -340,8 +344,9 @@ def create_pdf_report(results, final_rec):
         pdf.cell(40, 10, pdf_safe_text(strategy), 1)
         pdf.cell(35, 10, f"{totals['energy_wh']:.1f}", 1)
         pdf.cell(35, 10, f"{totals['carbon_g']:.1f}", 1)
-        pdf.cell(35, 10, f"{totals['avg_latency_ms']:.1f}", 1)
-        pdf.cell(35, 10, f"{totals['peak_ΔT']:.4f}", border=1, new_x="LMARGIN", new_y="NEXT")
+        latency = totals['avg_latency_ms']
+        pdf.cell(35, 10, f"{latency:.1f}" if latency == latency else "n/a", 1)  # NaN: nothing served
+        pdf.cell(35, 10, f"{totals['peak_ΔT']:.3e}", border=1, new_x="LMARGIN", new_y="NEXT")
     
     pdf.ln(10)
     
@@ -350,9 +355,12 @@ def create_pdf_report(results, final_rec):
     pdf.cell(0, 10, '3. Conclusion', border=0, new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", size=11)
     conclusion_text = (
-        f"The {final_rec['recommended_strategy']} routing strategy is recommended based on "
-        f"the analysis. This approach balances energy efficiency, latency, carbon emissions, "
-        f"and Delta-T Aware Routing mitigation for sustainable datacenter operations."
+        f"The {final_rec['recommended_strategy']} routing strategy is recommended for this scenario: among "
+        f"the strategies serving the most requests within the limits, it is closest to the best value on "
+        f"energy, carbon, latency and peak Delta-T AR together (equal weights). This is a simulation result, "
+        f"not a measured outcome." if feasible else
+        "No routing strategy could serve requests in this scenario, so no strategy is recommended. "
+        + "; ".join(final_rec.get('reasoning', []))
     )
     pdf.multi_cell(0, 7, pdf_safe_text(conclusion_text))
 
@@ -532,7 +540,8 @@ def classify_climate(temperature, humidity, wind_speed=None):
         "emoji": emoji_map.get(climate, "🌍")
     }
 
-def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb=None):
+def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb=None,
+                                     start_date=None, end_date=None):
     """
     Fetch 4 years of hourly weather for all datacenters
     using Open-Meteo Historical Forecast API.
@@ -547,8 +556,9 @@ def collect_historical_training_data(start_year=2021, end_year=2024, progress_cb
 
     all_records = []
 
-    start_date = f"{start_year}-01-01"
-    end_date = f"{end_year}-12-31"
+    # An explicit date range (the selectable training period) takes precedence over whole years.
+    start_date = str(start_date) if start_date else f"{start_year}-01-01"
+    end_date = str(end_date) if end_date else f"{end_year}-12-31"
 
     logging.info(f"📥 Fetching hourly historical weather from {start_date} to {end_date}")
 
@@ -789,6 +799,8 @@ class AIModelSuite:
     def __init__(self):
         self.models = {}
         self.scalers = {}
+        # Historical weather window for training; set before train_all to use another period.
+        self.training_period = ("2021-01-01", "2024-12-31")
         self.metrics = {}
         self.timing = {}
         self.feature_names = list(FEATURE_NAMES)
@@ -811,12 +823,17 @@ class AIModelSuite:
         """
         data = []
         cooling_types = COOLING_TYPES
+        # Every record gets a cooling technology drawn uniformly at random (fixed seed), so all
+        # supported cooling choices are trained across the full range of weather. Assigning only
+        # the climate-recommended technology left most weather/cooling combinations unseen.
+        cooling_rng = np.random.default_rng(20240101)
 
 # --- 1. Try real historical weather-based training data ---
         if use_real_weather:
             try:
                 # 4 years of hourly data for all datacenters
-                weather_df = collect_historical_training_data(start_year=2021, end_year=2024)
+                weather_df = collect_historical_training_data(start_date=self.training_period[0],
+                                                              end_date=self.training_period[1])
 
                 if weather_df is not None and not weather_df.empty:
                     for _, row in weather_df.iterrows():
@@ -826,12 +843,8 @@ class AIModelSuite:
                         pressure = float(row.get("pressure", 1013.25))
                         solar = float(row.get("solar_radiation", 200.0))
 
-                        # Derive cooling type from your climate classifier
-                        climate_info = classify_climate(temp, humidity, wind)
-                        cooling_str = climate_info.get("recommended_cooling", None)
-                        if cooling_str not in cooling_types:
-                            cooling_str = cooling_types[0]  # safe default
-                        cooling_idx = cooling_types.index(cooling_str)
+                        cooling_idx = int(cooling_rng.integers(0, len(cooling_types)))
+                        cooling_str = cooling_types[cooling_idx]
 
                         energy = surrogate_energy_target(temp, humidity, wind, pressure, solar, cooling_str)
                         energy += np.random.normal(0, 0.003)
@@ -909,7 +922,7 @@ class AIModelSuite:
         )
 
         # ========== DATA SPLITTING (70/15/15) ==========
-        X = df[['temperature', 'humidity', 'wind_speed', 'pressure', 'solar_radiation', 'cooling_type']].values
+        X = encode_features(df[['temperature', 'humidity', 'wind_speed', 'pressure', 'solar_radiation', 'cooling_type']].values)
         y = df['energy'].values
 
         # Split into train+val (85%) and test (15%)
@@ -954,7 +967,7 @@ class AIModelSuite:
                 'train_time': train_time,
                 'predictions': mlr_pred,
                 'y_test': y_test,
-                'coefficients': dict(zip(self.feature_names, mlr.coef_))
+                'coefficients': dict(zip(MODEL_INPUT_NAMES, mlr.coef_))
             }
             logging.info(f"[MLR] R²: {results['MLR']['r2']:.4f}")
 
@@ -1073,7 +1086,7 @@ class AIModelSuite:
         # Feature importance (using TEST set for evaluation, not training)
         if 'MLR' in self.models:
             mlr = self.models['MLR']
-            importances = dict(zip(self.feature_names, mlr.coef_))
+            importances = dict(zip(MODEL_INPUT_NAMES, mlr.coef_))
             results.setdefault("feature_importance", {})
             results["feature_importance"]["MLR"] = importances   # from MLR
 # ...
@@ -1088,7 +1101,7 @@ class AIModelSuite:
                 # Fix: Access importances_mean correctly from Bunch object
                 importance_dict = {
                     name: float(imp) for name, imp in 
-                    zip(self.feature_names, perm_importance['importances_mean'])
+                    zip(MODEL_INPUT_NAMES, perm_importance['importances_mean'])
                 }
                 results.setdefault("feature_importance", {})["ANN"] = importance_dict
             except Exception as e:
@@ -1168,6 +1181,9 @@ class AIModelSuite:
                     key=lambda x: valid_results[x]['val_r2']
                 )
                 self.best_model = self.models[self.best_model_name]
+                # Separate check of cooling comparisons (what changing cooling relies on).
+                results["cooling_validation"] = {name: self.validate_cooling_comparisons(name)
+                                                 for name in valid_results}
 
         #         # Prepare ΔT target
         #         y_dt = df['delta_t'].values
@@ -1230,6 +1246,39 @@ class AIModelSuite:
         self.metrics = results
         return results
 
+    def validate_cooling_comparisons(self, model_name=None, n_weather=400, seed=7):
+        """Check the use the dashboard makes of the model: comparing cooling technologies under
+        the same weather. For sampled weather conditions, every pair of technologies is compared
+        by the model and by the reference formula (noise-free training target).
+
+        Reports how often the model orders the pair the same way as the formula, and the error in
+        the predicted difference between the two technologies. Overall R² does not measure this.
+        """
+        name = model_name or self.best_model_name
+        model, scaler = self.models[name], self.scalers['main']
+        rng = np.random.default_rng(seed)
+        weather = np.column_stack([rng.uniform(0, 45, n_weather), rng.uniform(20, 95, n_weather),
+                                   rng.uniform(0.5, 15, n_weather), rng.uniform(980, 1040, n_weather),
+                                   rng.uniform(0, 1000, n_weather)])
+        predicted, reference = [], []
+        for index, cooling in enumerate(COOLING_TYPES):
+            rows = np.column_stack([weather, np.full(n_weather, index)])
+            predicted.append(model.predict(scaler.transform(encode_features(rows))))
+            reference.append([surrogate_energy_target(*w, cooling) for w in weather])
+        predicted, reference = np.array(predicted), np.array(reference)
+        agree, deltas = [], []
+        for a in range(len(COOLING_TYPES)):
+            for b in range(a + 1, len(COOLING_TYPES)):
+                true_delta, model_delta = reference[a] - reference[b], predicted[a] - predicted[b]
+                meaningful = np.abs(true_delta) > 1e-3  # ignore pairs the formula treats as equal
+                agree.append(np.sign(true_delta[meaningful]) == np.sign(model_delta[meaningful]))
+                deltas.append(np.abs(model_delta - true_delta))
+        agreement = float(np.mean(np.concatenate(agree))) if agree else 1.0
+        return {"model": name, "weather_samples": n_weather, "pairs": len(deltas),
+                "order_agreement": agreement,
+                "delta_mae_wh": float(np.mean(np.concatenate(deltas))),
+                "delta_max_error_wh": float(np.max(np.concatenate(deltas)))}
+
     def predict(self, features, model_name=None):
         """
         Predict energy using specified or best model.
@@ -1244,7 +1293,7 @@ class AIModelSuite:
         if model_name not in self.models:
             model_name = list(self.models.keys())[0]
 
-        X = np.array(features).reshape(1, -1)
+        X = encode_features(np.array(features).reshape(1, -1))
         X_scaled = self.scalers['main'].transform(X)
 
         return max(1e-6, float(self.models[model_name].predict(X_scaled)[0]))
@@ -1258,7 +1307,7 @@ class AIModelSuite:
         if not self.metrics:
             return ("MLR", 0.0)
 
-        skip = {"feature_importance", "DT"}
+        skip = {"feature_importance", "DT", "cooling_validation"}
         best_name, best_r2 = None, -np.inf
 
         for name, metrics in self.metrics.items():
@@ -1278,12 +1327,25 @@ class AIModelSuite:
 # ============================================================================
 # SIMULATION ENGINE
 # ============================================================================
+def validate_coordinates(lat, lon, label="Location"):
+    """Reject impossible coordinates before they reach distance, latency and map calculations."""
+    lat, lon = float(lat), float(lon)
+    if not (math.isfinite(lat) and -90 <= lat <= 90):
+        raise ValueError(f"{label}: latitude must be between -90 and 90 degrees (got {lat}).")
+    if not (math.isfinite(lon) and -180 <= lon <= 180):
+        raise ValueError(f"{label}: longitude must be between -180 and 180 degrees (got {lon}).")
+
+
 def run_simulation(datacenters, weather_data, user_location, num_requests,
                    cooling_selections, energy_multiplier=1.0, ai_models=None,
-                   latency_threshold=100, max_dc_capacity_mw=100, max_site_share=1.0):
+                   latency_threshold=100, max_dc_capacity_mw=100, max_site_share=1.0,
+                   carbon_intensities=None, carbon_time=None):
     """
     Run complete simulation for all routing strategies.
     ``max_site_share`` caps the fraction of the batch any one datacenter may take.
+    ``carbon_intensities`` (site -> kg CO2e/kWh) are frozen carbon inputs recorded when the
+    simulation was first run; sites missing from it are evaluated at ``carbon_time`` (UTC), so a
+    rerun or later analysis reproduces the same carbon results instead of following the clock.
     Returns comprehensive metrics for comparison.
 
     Fixes included:
@@ -1295,25 +1357,40 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
     """
     if num_requests <= 0:
         raise ValueError("Request volume must be positive.")
+    validate_coordinates(*user_location, label="Request origin")
+    for dc_name, dc_info in datacenters.items():
+        validate_coordinates(dc_info["lat"], dc_info["lon"], label=dc_name)
     user_lat, user_lon = user_location
-    hour = datetime.now().hour
+    # One latency rule for every strategy: a site takes no more requests than it can serve
+    # within the limit. Requests no site can serve in time are reported as unserved.
+    latency_caps = latency_caps_for(datacenters, user_location, num_requests, latency_threshold)
+    common = dict(max_site_share=max_site_share, latency_caps=latency_caps)
+    site_energy = energy_map(datacenters, weather_data, cooling_selections, ai_models, energy_multiplier)
+    limits = {"latency": latency_caps,
+              "power": {dc: int(max_dc_capacity_mw * 1e6 / e) for dc, e in site_energy.items()},
+              "share": int(num_requests * max_site_share + 1e-9)}
+    frozen = dict(carbon_intensities or {})
+    missing = {dc: info for dc, info in datacenters.items() if dc not in frozen}
+    if missing:
+        snapshot = carbon_snapshot(missing, carbon_time)
+        frozen.update({dc: site["intensity_kg_per_kwh"] for dc, site in snapshot["sites"].items()})
 
     strategies = {
         'Random': route_random(datacenters, num_requests, weather_data, cooling_selections, ai_models, max_dc_capacity_mw, energy_multiplier,
-                                         max_site_share=max_site_share),
+                                         **common),
         'Energy-Only': route_energy_only(datacenters, weather_data, cooling_selections,
                                          num_requests, ai_models, max_dc_capacity_mw, energy_multiplier,
-                                         max_site_share=max_site_share),
+                                         **common),
         'Heat-Only': route_heat_only(datacenters, weather_data, cooling_selections,
                                      num_requests, ai_models, max_dc_capacity_mw, energy_multiplier,
-                                         max_site_share=max_site_share),
+                                         **common),
         'ΔT-AR': route_ΔT_aware(datacenters, weather_data, cooling_selections,
                                 num_requests, ai_models, max_dc_capacity_mw, energy_multiplier,
-                                         max_site_share=max_site_share),
+                                         **common),
         'Multi-Objective': route_multi_objective(datacenters, weather_data, cooling_selections,
                                                  user_location, num_requests, ai_models,
                                                  latency_threshold, max_dc_capacity_mw, energy_multiplier,
-                                         max_site_share=max_site_share)
+                                                 max_site_share=max_site_share, carbon_intensities=frozen)
     }
 
     results = {}
@@ -1321,7 +1398,8 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
     for strategy_name, distribution in strategies.items():
         strategy_results = {
             'distribution': distribution,
-            'datacenters': {}
+            'datacenters': {},
+            'limits': limits,
         }
 
         served_requests = sum(distribution.values())
@@ -1383,15 +1461,15 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
             # Carbon (kg) : kWh × (kg/kWh)
             # -------------------------
             region = dc_info.get('region', 'default')
-            carbon_intensity = get_carbon_intensity(region, hour)
+            carbon_intensity = frozen[dc_name]  # recorded once for this simulation
             dc_carbon_kg = dc_heat_kwh * float(carbon_intensity)
 
             # -------------------------
             # Latency (ms) – use true load_fraction
             # -------------------------
             distance_km = haversine_distance(user_lat, user_lon, dc_info['lat'], dc_info['lon'])
-            load_fraction = float(requests) / float(num_requests)
-            dc_latency_ms = calculate_latency(distance_km, load_fraction=load_fraction)
+            load_fraction = float(requests) / float(num_requests)  # share of the batch (reported)
+            dc_latency_ms = calculate_latency(distance_km, load_fraction=site_utilization(requests))
 
             # Store DC-level metrics
             strategy_results['datacenters'][dc_name] = {
@@ -1437,7 +1515,7 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
             'energy_wh': total_energy_wh,
             'carbon_kg': total_carbon_kg,
             'carbon_g': total_carbon_kg * 1000,
-            'avg_latency_ms': weighted_latency_ms,
+            'avg_latency_ms': weighted_latency_ms if served_requests else float('nan'),
             'total_heat_wh': total_heat_wh,
             'total_heat_kwh': total_heat_wh / 1000.0,
             'heat_cv': heat_cv,
@@ -1452,7 +1530,8 @@ def run_simulation(datacenters, weather_data, user_location, num_requests,
 
 def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
                     cooling_selections, energy_multiplier, ai_models, n_runs=100,
-                    latency_threshold=100, max_dc_capacity_mw=100, max_site_share=1.0):
+                    latency_threshold=100, max_dc_capacity_mw=100, max_site_share=1.0,
+                    carbon_intensities=None, carbon_time=None):
     """
     Run Monte Carlo simulation with stochastic weather variations.
     """
@@ -1478,7 +1557,8 @@ def run_monte_carlo(datacenters, weather_data, user_location, num_requests,
         results = run_simulation(
             datacenters, varied_weather, user_location,
             varied_requests, cooling_selections, energy_multiplier, ai_models,
-            latency_threshold, max_dc_capacity_mw, max_site_share
+            latency_threshold, max_dc_capacity_mw, max_site_share,
+            carbon_intensities=carbon_intensities, carbon_time=carbon_time
         )
         
         for strategy, data in results.items():
@@ -2149,7 +2229,7 @@ def create_monte_carlo_boxplots(mc_results):
             ), row=row, col=col)
     
     fig.update_layout(
-        title=dict(text="<b>Monte Carlo Simulation Results (95% CI)</b>",
+        title=dict(text="<b>Monte Carlo Results: distribution across runs</b>",
                   font=dict(size=48, family='Times New Roman', color='#000000')),
         height=1400,
         margin=dict(l=120, r=80, t=140, b=220),
@@ -2379,8 +2459,10 @@ def create_carbon_intensity_curves(datacenters=None):
         'San Francisco (California)': 'california', 
         'Stockholm (Sweden)': 'sweden'
     }
+    longitudes = {'Phoenix (Arizona)': -112.07, 'San Francisco (California)': -122.42, 'Stockholm (Sweden)': 18.07}
     if datacenters:
         regions = {name: info.get('region', 'default') for name, info in datacenters.items()}
+        longitudes = {name: info.get('lon', 0.0) for name, info in datacenters.items()}
     
     colors = {
         'Phoenix (Arizona)': '#dc2626',
@@ -2402,18 +2484,24 @@ def create_carbon_intensity_curves(datacenters=None):
             name=region_name,
             line=dict(color=color, width=3),
             fill='tozeroy',
-            fillcolor=color,
+            # Translucent fills: the curves overlap (they are not stacked), so each stays visible.
+            fillcolor=f"rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.15)"
+            if color.startswith('#') and len(color) == 7 else color,
+        ))
+        # Each site's "now" is its own local solar hour, so the marker sits on its own curve.
+        now_hour = local_solar_hour(longitudes.get(region_name, 0.0))
+        fig.add_trace(go.Scatter(
+            x=[now_hour], y=[values[now_hour]], mode='markers+text', text=['now'],
+            textposition='top center', marker=dict(size=12, color=color, line=dict(width=2, color='white')),
+            showlegend=False, hovertemplate=f"{region_name}<br>Local hour now: {now_hour}:00<br>"
+                                            "%{y:.3f} kg CO₂/kWh<extra></extra>",
         ))
     
-    # Add current hour marker
-    current_hour = datetime.now().hour
-    fig.add_vline(x=current_hour, line_dash="dash", line_color="#666",
-                  annotation_text=f"Current: {current_hour}:00")
     
     fig.update_layout(
         title=dict(text="<b>24-Hour Carbon Intensity Patterns</b>",
                   font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Hour of Day</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        xaxis_title=dict(text="<b>Local hour of day at each site</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
         yaxis_title=dict(text="<b>Carbon Intensity (kg CO₂/kWh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
         height=800,
         margin=dict(l=110, r=60, t=120, b=100),
@@ -2653,7 +2741,6 @@ def generate_initial_recommendation(datacenters, weather_data, user_location, la
     All calculations are DYNAMIC.
     """
     user_lat, user_lon = user_location
-    hour = datetime.now().hour
     
     scores = {}
     details = {}
@@ -2668,7 +2755,7 @@ def generate_initial_recommendation(datacenters, weather_data, user_location, la
         cooling = dc_info.get('default_cooling', 'air_economizer')
         energy = calculate_energy_per_request(temp, weather.get('humidity', 50), cooling)
         region = dc_info.get('region', 'default')
-        carbon = get_carbon_intensity(region, hour)
+        carbon = get_carbon_intensity(region, local_solar_hour(dc_info['lon']))
         
         details[dc_name] = {
             'distance': distance,
@@ -2735,23 +2822,64 @@ def generate_initial_recommendation(datacenters, weather_data, user_location, la
     }
 
 
+def binding_constraint(results):
+    """Name the limit that left every site with zero capacity, from the limits each result records."""
+    limits = next((r.get('limits') for r in results.values() if r.get('limits')), None)
+    if not limits:
+        return "constraints left no capacity"
+    reasons = []
+    if limits.get("latency") is not None and not any(limits["latency"].values()):
+        reasons.append("no selected datacenter can respond within the latency limit")
+    if not any(limits.get("power", {}).values()):
+        reasons.append("the power capacity allows no requests")
+    if limits.get("share", 1) == 0:
+        reasons.append("the maximum share per site allows no requests")
+    return "; ".join(reasons) or "the combined limits leave no capacity at any site"
+
+
+RECOMMENDATION_METRICS = {"energy_wh": "Energy", "carbon_g": "Carbon", "avg_latency_ms": "Latency",
+                          "peak_ΔT": "Peak ΔT-AR"}
+RECOMMENDATION_BASELINES = ("Random",)  # sampled reference only; never recommended
+
+
 def generate_final_recommendation(results, latency_threshold):
     """
-    Generate final strategy recommendation based on simulation results.
-    All calculations are DYNAMIC.
+    Recommend a strategy from this run's calculated results.
+
+    1. Candidates: every strategy except the Random baseline. Latency limits are already applied
+       to all strategies during allocation, so "served" means served within the limit.
+    2. Keep the candidates that serve the most requests.
+    3. Among those, pick the strategy closest to the best value on every metric at once:
+       for each of energy, carbon, latency and peak ΔT-AR, its gap to the best candidate
+       (value / best - 1); the score is the average gap with equal weights. Lower is better;
+       ties go to the lower peak ΔT-AR.
+
+    Scoring several metrics avoids a circular result: ΔT-AR minimizes peak ΔT by construction,
+    so ranking on peak ΔT alone would always pick it.
     """
     strategies = list(results.keys())
-    
-    # Find best strategy for ΔT-AR reduction
-    ΔT_scores = {s: results[s]['totals']['peak_ΔT'] for s in strategies}
-    fully_served = [s for s in strategies if results[s]['totals'].get('unserved_requests', 0) == 0]
-    if fully_served:
-        candidates = fully_served
-    else:
-        maximum_served = max(results[s]['totals'].get('served_requests', 0) for s in strategies)
-        candidates = [s for s in strategies if results[s]['totals'].get('served_requests', 0) == maximum_served]
-    best_ΔT = min(candidates, key=lambda s: ΔT_scores[s])
-    
+    eligible = [s for s in strategies if s not in RECOMMENDATION_BASELINES] or strategies
+    excluded = {s: "baseline" for s in strategies if s not in eligible}
+    maximum_served = max(results[s]['totals'].get('served_requests', 0) for s in eligible)
+    candidates = [s for s in eligible if results[s]['totals'].get('served_requests', 0) == maximum_served]
+    excluded.update({s: "fewer requests served" for s in eligible if s not in candidates})
+    if maximum_served == 0:
+        constraint = binding_constraint(results)
+        return {
+            'recommended_strategy': None, 'feasible': False, 'binding_constraint': constraint,
+            'reasoning': [f"No feasible strategy: no requests could be served ({constraint})."],
+            'improvements': {}, 'scores': {}, 'gaps': {}, 'candidates': [], 'excluded': excluded,
+            'served_requests': 0, 'energy_only_metrics': results.get('Energy-Only', {}).get('totals'),
+            'best_metrics': None,
+        }
+
+    best_values = {m: min(results[s]['totals'][m] for s in candidates) for m in RECOMMENDATION_METRICS}
+    gaps = {s: {m: (results[s]['totals'][m] / best_values[m] - 1) if best_values[m] > 0
+                else (0.0 if results[s]['totals'][m] <= 0 else float('inf'))
+                for m in RECOMMENDATION_METRICS} for s in candidates}
+    scores = {s: sum(gaps[s].values()) / len(RECOMMENDATION_METRICS) for s in candidates}
+    best_ΔT = min(candidates, key=lambda s: (scores[s], results[s]['totals']['peak_ΔT']))
+
     # Calculate improvements vs Energy-Only
     energy_only = results['Energy-Only']['totals']
     best = results[best_ΔT]['totals']
@@ -2844,62 +2972,90 @@ def generate_final_recommendation(results, latency_threshold):
         'improvements': improvements,
         'reasoning': reasoning,
         'energy_only_metrics': energy_only,
-        'best_metrics': best
+        'best_metrics': best,
+        'scores': scores,
+        'gaps': gaps,
+        'candidates': candidates,
+        'excluded': excluded,
+        'served_requests': maximum_served,
+        # False when no strategy can serve any request (e.g. no site meets the latency limit);
+        # the named strategy is then only a placeholder and must not be presented as a choice.
+        'feasible': maximum_served > 0,
     }
 
 
-def calculate_statistical_significance(mc_results):
+def calculate_statistical_significance(mc_results, reference="ΔT-AR", metric="peak_ΔT"):
     """
-    Calculate statistical significance of Monte Carlo results.
-    All values are CALCULATED from actual data.
+    Paired comparison of ``reference`` against every other strategy on ``metric``.
+
+    Each Monte Carlo run applies the same sampled weather and demand to all strategies, so
+    results are paired by run. For each comparison: Wilcoxon signed-rank test on the per-run
+    differences, Holm correction across comparisons, median difference, paired effect size
+    (Cohen's d_z = mean / std of differences) and the share of runs where the reference is lower.
+
+    Simulated p-values shrink as more runs are added, so the effect sizes and win rates are the
+    more meaningful numbers; none of this is field validation.
     """
-    if 'Energy-Only' not in mc_results or 'Multi-Objective' not in mc_results:
+    if reference not in mc_results:
         return None
-    
-    energy_only_ΔT = mc_results['Energy-Only']['raw_data']['peak_ΔT']
-    multi_obj_ΔT = mc_results['Multi-Objective']['raw_data']['peak_ΔT']
-    
-    # Welch's t-test
-    t_stat, p_value = stats.ttest_ind(energy_only_ΔT, multi_obj_ΔT, equal_var=False)
-    
-    # Ensure p_value is a Python float (convert numpy scalar to native Python float)
-    p_value = float(np.asarray(p_value).item())
-    
-    # Effect size (Cohen's d)
-    pooled_std = np.sqrt((energy_only_ΔT.var() + multi_obj_ΔT.var()) / 2)
-    cohens_d = (energy_only_ΔT.mean() - multi_obj_ΔT.mean()) / pooled_std if pooled_std > 0 else 0
-    
-    # Confidence interval for difference
-    mean_diff = energy_only_ΔT.mean() - multi_obj_ΔT.mean()
-    se_diff = np.sqrt(energy_only_ΔT.var()/len(energy_only_ΔT) + 
-                      multi_obj_ΔT.var()/len(multi_obj_ΔT))
-    ci_lower = mean_diff - 1.96 * se_diff
-    ci_upper = mean_diff + 1.96 * se_diff
-    
-    # Determine significance level
-    if p_value < 0.001:
-        significance = "HIGHLY SIGNIFICANT (p < 0.001)"
-        significant = True
-    elif p_value < 0.01:
-        significance = "VERY SIGNIFICANT (p < 0.01)"
-        significant = True
-    elif p_value < 0.05:
-        significance = "SIGNIFICANT (p < 0.05)"
-        significant = True
-    else:
-        significance = "NOT SIGNIFICANT (p ≥ 0.05)"
-        significant = False
-    
+    ref_values = np.asarray(mc_results[reference]['raw_data'][metric], dtype=float)
+    ref_unserved = np.asarray(mc_results[reference]['raw_data'].get('unserved_requests', 0), dtype=float)
+    comparisons = {}
+    for name, data in mc_results.items():
+        if name == reference or 'raw_data' not in data:
+            continue
+        other = np.asarray(data['raw_data'][metric], dtype=float)
+        n = min(len(ref_values), len(other))
+        diff = ref_values[:n] - other[:n]  # negative: reference is lower (better)
+        if n == 0:
+            continue
+        # Only exactly equal results count as "no difference". ΔT values are ~1e-4 °C, so a
+        # tolerance-based check (np.allclose) would silently discard real, consistent differences.
+        if np.all(diff == 0):
+            p_value = 1.0
+        else:
+            p_value = float(stats.wilcoxon(diff, zero_method="wilcox").pvalue)
+        spread = float(np.std(diff, ddof=1)) if n > 1 else 0.0
+        # d_z is undefined when every difference is identical (zero spread): report None rather
+        # than 0, which would wrongly suggest no effect.
+        cohens_dz = float(np.mean(diff) / spread) if spread > 0 else None
+        unserved = np.asarray(data['raw_data'].get('unserved_requests', 0), dtype=float)
+        comparisons[name] = {
+            'n_runs': int(n),
+            'median_difference': float(np.median(diff)),
+            'mean_difference': float(np.mean(diff)),
+            'cohens_dz': cohens_dz,
+            'reference_lower_share': float(np.mean(diff < 0)),
+            'p_value': p_value,
+            # A strategy that served fewer requests in some runs has less heat for that reason alone.
+            'unserved_runs': int(np.sum(np.atleast_1d(unserved)[:n] > 0) + np.sum(np.atleast_1d(ref_unserved)[:n] > 0)),
+        }
+    if not comparisons:
+        return None
+    # Holm step-down correction across the comparisons.
+    ordered = sorted(comparisons, key=lambda k: comparisons[k]['p_value'])
+    running = 0.0
+    for rank, name in enumerate(ordered):
+        adjusted = min(1.0, (len(ordered) - rank) * comparisons[name]['p_value'])
+        running = max(running, adjusted)
+        comparisons[name]['p_holm'] = running
+    for result in comparisons.values():
+        result['significant'] = result['p_holm'] < 0.05
+    headline = comparisons.get('Energy-Only') or comparisons[ordered[0]]
     return {
-        't_statistic': t_stat,
-        'p_value': p_value,
-        'mean_difference': mean_diff,
-        'ci_95': (ci_lower, ci_upper),
-        'cohens_d': cohens_d,
-        'significance': significance,
-        'significant': significant,
-        'sample_size': len(energy_only_ΔT)
+        'reference': reference,
+        'metric': metric,
+        'test': 'Wilcoxon signed-rank (paired by Monte Carlo run), Holm-corrected',
+        'comparisons': comparisons,
+        # Backward-compatible summary fields (vs Energy-Only when available).
+        'p_value': headline['p_holm'],
+        'mean_difference': headline['mean_difference'],
+        'cohens_d': headline['cohens_dz'],
+        'significant': headline['significant'],
+        'sample_size': headline['n_runs'],
     }
+
+
 # ---- Cache weather to avoid re-fetching every rerun ----
 @st.cache_data(ttl=300, show_spinner=False)  # Current weather: five-minute cache.
 def cached_weather(lat, lon, name, climate_hint=None):

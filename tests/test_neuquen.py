@@ -72,11 +72,15 @@ def test_neuquen_location_weather_map_routing_and_carbon(monkeypatch, tmp_path, 
     at.button(key="run_sim_btn").click().run(timeout=30)
     assert not at.exception
     results = at.session_state["sim_results"]
+    # Carbon is frozen once per run at each site's local solar hour and recorded in the receipt.
+    frozen = at.session_state["sim_receipt"]["inputs"]["carbon"]["sites"]["Neuquén, Argentina"]
+    lon = app.EXTENDED_DC_LOCATIONS["Neuquén, Argentina"]["lon"]
+    assert frozen["intensity_kg_per_kwh"] == pytest.approx(
+        carbon_model.get_carbon_intensity("argentina", frozen["local_solar_hour"]))
     for strategy in results.values():
         dc = strategy["datacenters"]["Neuquén, Argentina"]
         assert dc["distance_km"] == pytest.approx(0)
-        expected = carbon_model.get_carbon_intensity("argentina")
-        assert dc["carbon_kg"] == pytest.approx(dc["energy_wh"] / 1000 * expected)
+        assert dc["carbon_kg"] == pytest.approx(dc["energy_wh"] / 1000 * frozen["intensity_kg_per_kwh"])
     sources = next(frame.value for frame in at.dataframe if "Source URL" in frame.value.columns)
     neuquen = sources.loc[sources["Datacenter"] == "Neuquén, Argentina"].iloc[0]
     assert neuquen["Source"] == "OWID / Ember annual grid data"
@@ -87,5 +91,8 @@ def test_neuquen_location_weather_map_routing_and_carbon(monkeypatch, tmp_path, 
                                      {"Neuquén, Argentina": 500, "Phoenix, AZ": 500})
     assert any(trace.mode == "lines" and -38.95 in trace.lat for trace in fig.data)
     chart = app.create_carbon_intensity_curves(locations)
-    assert [trace.name for trace in chart.data] == list(locations)
-    assert len(chart.data[0].y) == 24
+    curves = [trace for trace in chart.data if trace.mode == "lines"]
+    assert [trace.name for trace in curves] == list(locations)
+    assert len(curves[0].y) == 24
+    # One "now" marker per site, at that site's own local hour (not the server clock).
+    assert sum(1 for trace in chart.data if trace.mode == "markers+text") == len(locations)

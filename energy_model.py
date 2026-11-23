@@ -64,6 +64,27 @@ COOLING_TYPES = tuple(sorted(COOLING_SYSTEMS))
 def cooling_index(cooling_type):
     return COOLING_TYPES.index(cooling_type)
 
+
+def model_input_names(feature_names=FEATURE_NAMES, cooling_types=COOLING_TYPES):
+    """Columns the models actually see: the numeric weather inputs, then one indicator column per
+    cooling technology. Cooling is categorical, so it is one-hot encoded rather than treated as an
+    ordered number (index 3 is not "more" cooling than index 1)."""
+    return list(feature_names[:-1]) + [f"cooling={name}" for name in cooling_types]
+
+
+MODEL_INPUT_NAMES = tuple(model_input_names())
+
+
+def encode_features(rows):
+    """Turn raw feature rows [temperature, humidity, wind, pressure, solar, cooling index] into
+    model inputs: the five numeric values followed by the one-hot cooling columns."""
+    import numpy as np
+    raw = np.atleast_2d(np.asarray(rows, dtype=float))
+    indices = raw[:, -1].astype(int)
+    if np.any((indices < 0) | (indices >= len(COOLING_TYPES))):
+        raise ValueError("Cooling index outside the supported cooling technologies.")
+    return np.hstack([raw[:, :-1], np.eye(len(COOLING_TYPES))[indices]])
+
 def calculate_energy_per_request(temperature, humidity, cooling_type, energy_multiplier=1.0):
     # """
     # Calculate energy consumption per AI request.

@@ -13,14 +13,19 @@ import tempfile
 import joblib
 import sklearn
 
-SCHEMA_VERSION = 2
+from energy_model import model_input_names
+
+DEFAULT_TRAINING_PERIOD = ("2021-01-01", "2024-12-31")  # historical weather window
+SCHEMA_VERSION = 3  # 3: one-hot cooling inputs, cooling sampled across all weather
 
 
-def training_config(mode, fingerprint, feature_names, cooling_types):
+def training_config(mode, fingerprint, feature_names, cooling_types, period=DEFAULT_TRAINING_PERIOD):
+    """Training identity: models trained on a different weather period are a different bundle."""
     return {"schema_version": SCHEMA_VERSION, "mode": mode,
             "fingerprint": fingerprint, "features": list(feature_names),
+            "model_inputs": model_input_names(tuple(feature_names), tuple(cooling_types)),
             "cooling_types": list(cooling_types), "sklearn_version": sklearn.__version__,
-            "use_real_weather": True, "years": [2021, 2024], "n_samples": 5000}
+            "use_real_weather": True, "period": [str(period[0]), str(period[1])], "n_samples": 5000}
 
 
 def config_key(config):
@@ -33,7 +38,7 @@ def validate_bundle(bundle, config):
     if bundle.get("feature_names") != config["features"]:
         raise ValueError("Model feature schema does not match.")
     scaler = bundle.get("scalers", {}).get("main")
-    if getattr(scaler, "n_features_in_", None) != len(config["features"]):
+    if getattr(scaler, "n_features_in_", None) != len(config.get("model_inputs", config["features"])):
         raise ValueError("Model scaler has the wrong feature count.")
     if bundle.get("best_model_name") not in bundle.get("models", {}):
         raise ValueError("Model bundle has no usable best model.")

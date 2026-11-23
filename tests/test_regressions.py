@@ -7,13 +7,13 @@ import pytest
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 
-from energy_model import COOLING_TYPES, FEATURE_NAMES, cooling_index
+from energy_model import COOLING_TYPES, FEATURE_NAMES, cooling_index, encode_features
 from model_store import (ModelStore, training_config, get_or_train_bundle,
                          validate_bundle, config_key)
-from routing_core import allocate_requests
+from routing_core import allocate_requests, latency_request_capacity
 from routing_strategies import (route_random, route_energy_only, route_heat_only,
                                 route_ΔT_aware, route_multi_objective, energy_map)
-from network_model import haversine_distance, calculate_latency
+from network_model import haversine_distance, calculate_latency, site_utilization
 from Benchmarking import benchmark_inference, _load_bundle
 
 
@@ -22,7 +22,9 @@ def config(mode="mlr", fingerprint="test"):
 
 
 def make_bundle(cfg):
-    x = np.random.default_rng(42).normal(size=(30, 6))
+    rng = np.random.default_rng(42)
+    raw = np.column_stack([rng.normal(size=(30, 5)), rng.integers(0, len(COOLING_TYPES), 30)])
+    x = encode_features(raw)  # models see one-hot cooling columns
     scaler = StandardScaler().fit(x)
     model = LinearRegression().fit(scaler.transform(x), x[:, 0] * 0.01 + 0.4)
     return {"training_config": cfg, "models": {"MLR": model}, "scalers": {"main": scaler},
@@ -140,12 +142,91 @@ def test_max_site_share_must_be_a_fraction():
 
 
 def test_multi_objective_enforces_latency_at_allocated_load():
+    # A batch is one hour: 1,000 requests barely load a site, so the nearby site serves them all
+    # within 50 ms while the distant one (Stockholm from Orlando) cannot meet the limit at all.
     dist = route_multi_objective(DC, WEATHER, COOLING, (28.5, -81.3), 1000, latency_threshold=50)
-    assert dist["far"] == 0 and 0 < dist["near"] < 1000
-    assert calculate_latency(0, dist["near"] / 1000) <= 50
-    assert calculate_latency(0, (dist["near"] + 1) / 1000) > 50
+    assert dist["far"] == 0 and dist["near"] == 1000
+    assert calculate_latency(0, site_utilization(1000)) <= 50
     assert sum(route_multi_objective(DC, WEATHER, COOLING, (28.5, -81.3), 1000,
                                     latency_threshold=1).values()) == 0
+
+
+def test_queueing_limits_a_site_at_real_datacenter_volumes():
+    # Load comes from the request rate (requests per hour / service rate), not the batch share,
+    # so the latency cap binds only once a site approaches saturation.
+    requests = 5_000_000
+    cap = latency_request_capacity(0, requests, 50, calculate_latency)
+    assert 0 < cap < requests
+    assert calculate_latency(0, site_utilization(cap)) <= 50 < calculate_latency(0, site_utilization(cap + 1))
+    # The same share of a small batch is not "busy": utilization depends on volume.
+    assert site_utilization(990) < site_utilization(990_000) < 1
+
+
+def test_latency_limit_applies_to_every_strategy():
+    import ai_assisted_datacenter_allocation as app
+    results = app.run_simulation(DC, WEATHER, (28.5, -81.3), 1000, COOLING, latency_threshold=50)
+    for name, data in results.items():
+        assert data["distribution"]["far"] == 0, name
+        served_latencies = [site["latency_ms"] for site in data["datacenters"].values() if site["requests"]]
+        assert all(latency <= 50 for latency in served_latencies), name
+
+
+def _totals(energy, carbon, latency, peak, served=1000):
+    return {"totals": {"energy_wh": energy, "carbon_g": carbon, "avg_latency_ms": latency, "peak_ΔT": peak,
+                       "heat_cv": 0.1, "served_requests": served, "unserved_requests": 1000 - served,
+                       "offered_requests": 1000}, "distribution": {}}
+
+
+def test_recommendation_weighs_all_metrics_and_never_picks_random():
+    import ai_assisted_datacenter_allocation as app
+    results = {
+        "Random": _totals(50, 5, 50, 0.5),            # best on everything, but only a baseline
+        "Energy-Only": _totals(100, 10, 80, 1.05),
+        "ΔT-AR": _totals(200, 20, 90, 1.00),         # lowest peak ΔT, far worse on energy and carbon
+        "Multi-Objective": _totals(90, 9, 70, 1.5, served=600),
+    }
+    recommendation = app.generate_final_recommendation(results, 100)
+    assert recommendation["recommended_strategy"] == "Energy-Only"
+    assert "Random" not in recommendation["candidates"]
+    assert recommendation["excluded"] == {"Random": "baseline", "Multi-Objective": "fewer requests served"}
+    assert recommendation["scores"]["Energy-Only"] < recommendation["scores"]["ΔT-AR"]
+
+
+def test_no_recommendation_when_nothing_can_be_served():
+    import ai_assisted_datacenter_allocation as app
+    from provenance import recommendation_markdown
+    results = {name: _totals(0, 0, 0, 0, served=0) for name in ("Random", "Energy-Only", "ΔT-AR")}
+    recommendation = app.generate_final_recommendation(results, 50)
+    assert recommendation["feasible"] is False
+    assert recommendation_markdown(recommendation).startswith("### No feasible strategy")
+
+
+def test_paired_statistics_compare_the_reference_with_every_strategy():
+    import pandas as pd
+    import ai_assisted_datacenter_allocation as app
+    rng = np.random.default_rng(3)
+    base = rng.uniform(1e-4, 2e-4, 40)
+    frame = lambda values: {"raw_data": pd.DataFrame({"peak_ΔT": values, "unserved_requests": 0})}
+    mc = {"ΔT-AR": frame(base), "Energy-Only": frame(base * 1.2), "Heat-Only": frame(base * 1.3),
+          "Random": frame(base + rng.normal(0, 1e-6, 40))}
+    result = app.calculate_statistical_significance(mc)
+    assert result["reference"] == "ΔT-AR" and set(result["comparisons"]) == {"Energy-Only", "Heat-Only", "Random"}
+    energy = result["comparisons"]["Energy-Only"]
+    assert energy["reference_lower_share"] == 1.0 and energy["p_holm"] < 0.05 and energy["cohens_dz"] < 0
+    holm = sorted(c["p_holm"] for c in result["comparisons"].values())
+    raw = sorted(c["p_value"] for c in result["comparisons"].values())
+    assert all(h >= r for h, r in zip(holm, raw))  # correction never lowers a p-value
+
+
+def test_carbon_uses_each_sites_local_solar_hour():
+    from datetime import datetime, timezone
+    from carbon_model import local_solar_hour
+    noon_utc = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    assert local_solar_hour(0, noon_utc) == 12
+    assert local_solar_hour(-90, noon_utc) == 6
+    assert local_solar_hour(180, noon_utc) == 0
+    assert local_solar_hour(18.07, noon_utc) == 13  # Stockholm is ahead of Orlando (≈ 6)
+    assert local_solar_hour(-81.38, noon_utc) == 6
 
 
 @pytest.mark.parametrize("seed", range(12))

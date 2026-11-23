@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 import numpy as np
 import joblib
-from energy_model import COOLING_TYPES, FEATURE_NAMES, surrogate_energy_target
+from energy_model import COOLING_TYPES, FEATURE_NAMES, surrogate_energy_target, encode_features
 from model_store import SCHEMA_VERSION, validate_bundle
 
 
@@ -82,10 +82,10 @@ def benchmark_inference(bundle: Dict[str, Any], n_samples: int = 10_000, seed: i
     model = bundle["models"][best_name]
 
     # small warm-up (helps stabilize first-call overhead)
-    _ = model.predict(scaler_main.transform(X_test[:32]))
+    _ = model.predict(scaler_main.transform(encode_features(X_test[:32])))
 
     t1 = time.perf_counter()
-    predictions = model.predict(scaler_main.transform(X_test))
+    predictions = model.predict(scaler_main.transform(encode_features(X_test)))
     surrogate_time = time.perf_counter() - t1
 
     # Derived stats

@@ -45,21 +45,12 @@ def weather_sources(weather):
     return pd.DataFrame(rows)
 
 
-def render_weather_table(weather, indicators, selections, cooling_options):
-    """Read-only conditions with one editable column: the cooling technology per datacenter.
-
-    ``cooling_options`` maps cooling codes to display labels. Returns the selections as edited.
-    """
+def render_weather_table(weather, indicators, selections):
+    """Read-only conditions; explicit cooling dropdowns remain visible above the readings."""
     frame = weather_frame(weather, indicators, selections).set_index("Datacenter", drop=False)
     with st.container(key="weather_matrix"):
-        edited = st.data_editor(frame, hide_index=True, row_height=38, width="stretch",
-            key="cooling_editor", num_rows="fixed",
-            disabled=[column for column in frame.columns if column != "Cooling technology"],
+        st.dataframe(frame.drop(columns=["Cooling technology"]), hide_index=True, row_height=38, width="stretch",
             column_config={
-                "Cooling technology": st.column_config.SelectboxColumn(
-                    tr("Cooling"), options=list(cooling_options), required=True, width="medium",
-                    format_func=lambda code: cooling_options.get(code, code),
-                    help=tr("New datacenters start with a weather-based cooling recommendation. Choose another technology to recalculate routing with the saved models. Choices for retained datacenters are preserved; PUE values are scenario assumptions.")),
                 "Datacenter": st.column_config.TextColumn(tr("Datacenter"), width="medium", pinned=True),
                 "Thermal category": st.column_config.TextColumn(tr("Thermal category"), width="small"),
                 "Temperature": st.column_config.TextColumn(tr("Temperature") + " · °C [°F]", width="medium"),
@@ -71,4 +62,3 @@ def render_weather_table(weather, indicators, selections, cooling_options):
                     help=tr("Fixed scenario efficiency assumption for the selected cooling technology.")),
                 "Data source": st.column_config.TextColumn(tr("Data source"), width="small"),
             })
-    return {**selections, **edited["Cooling technology"].to_dict()}
