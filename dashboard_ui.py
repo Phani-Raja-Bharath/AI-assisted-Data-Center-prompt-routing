@@ -76,6 +76,24 @@ def network_backdrop():
 AXIS_COLOR_KEYS = ("gridcolor", "linecolor", "zerolinecolor", "tickcolor")
 
 
+def _aptos_fonts(node, tile_map=False):
+    """Normalize nested Plotly fonts, including templates and hover labels.
+
+    Tile-map text uses server-provided glyphs instead of browser web fonts.
+    """
+    if isinstance(node, list):
+        for item in node:
+            _aptos_fonts(item, tile_map)
+    elif isinstance(node, dict):
+        tile_map = tile_map or node.get("type") in ("scattermap", "scattermapbox")
+        for key, value in node.items():
+            if tile_map and key == "textfont":
+                continue
+            if key.endswith("font") and isinstance(value, dict):
+                value["family"] = "Aptos, sans-serif"
+            _aptos_fonts(value, tile_map)
+
+
 def _theme_neutral(node, in_trace=False, trace_type=None):
     """Strip hard-coded paper styling (black Times text, white legend boxes, fixed grid colors)
     so Streamlit's Plotly theme can color the chart for light or dark mode.
@@ -94,7 +112,7 @@ def _theme_neutral(node, in_trace=False, trace_type=None):
                 if not (in_trace and trace_type == "heatmap" and key == "textfont"):
                     value.pop("color", None)
                 if "family" in value:
-                    value["family"] = "Aptos, Calibri, sans-serif"
+                    value["family"] = "Aptos, sans-serif"
             elif key == "legend":
                 value.pop("bgcolor", None)
                 value.pop("bordercolor", None)
@@ -111,7 +129,7 @@ def _theme_neutral(node, in_trace=False, trace_type=None):
 
 def display_plot(figure, key, height=360):
     """Show a figure in the dashboard: compact typography, and colors from the active theme.
-    The source figures keep their paper styling for downloads; only this copy is restyled."""
+    The source figures keep their sizing/colors for downloads; only this copy is restyled."""
     if figure is None:
         return
     figure = go.Figure(localized_figure(figure))
@@ -133,7 +151,7 @@ def display_plot(figure, key, height=360):
     figure.update_layout(height=height, title=None, paper_bgcolor="rgba(0,0,0,0)",
                          plot_bgcolor="rgba(0,0,0,0)",
                          margin=dict(l=0, r=0, t=0, b=0) if is_map else dict(l=35, r=20, t=25, b=45),
-                         font=dict(family="Aptos, Calibri, sans-serif", size=13),
+                         font=dict(family="Aptos, sans-serif", size=13),
                          legend=dict(font=dict(size=11)))
     # automargin grows the margins to fit tick labels and axis titles, so they never overlap.
     figure.update_xaxes(title_font=dict(size=12, family="Aptos"), tickfont=dict(size=11, family="Aptos"),
@@ -156,6 +174,10 @@ def display_plot(figure, key, height=360):
         # Unnamed bars would hover as "trace 1"; show the category and value instead.
         if trace.type == "bar" and not trace.name and not trace.hovertemplate:
             trace.hovertemplate = ("%{y}: %{x:.4g}" if trace.orientation == "h" else "%{x}: %{y:.4g}") + "<extra></extra>"
+    spec = figure.to_plotly_json()
+    _aptos_fonts(spec)
+    figure = go.Figure(spec)
+    figure.update_layout(hoverlabel_font_family="Aptos, sans-serif")
     st.plotly_chart(figure, key=key, width="stretch", config={
         "displaylogo": False, "responsive": True,
         "toImageButtonOptions": {"format": "png", "scale": 3, "width": 1600, "height": 900},

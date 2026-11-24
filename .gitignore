@@ -42,8 +42,10 @@ htmlcov/
 /build/
 /.neon
 
-# Licensed Aptos files are installed locally, never redistributed in Git.
+# Keep unused display variants local; the app deploys regular/bold Aptos.
 /static/fonts/*.ttf
+!/static/fonts/Aptos-Regular.ttf
+!/static/fonts/Aptos-Bold.ttf
 
 # Operating-system metadata.
 .DS_Store

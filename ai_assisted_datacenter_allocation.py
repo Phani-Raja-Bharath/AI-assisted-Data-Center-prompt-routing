@@ -1601,7 +1601,7 @@ def create_geographic_map(datacenters, user_location, distribution=None, title="
                    line=dict(width=2, color='white')),
         text=['You'],
         textposition='top center',
-        textfont=dict(size=28, color='#e94560', family='Times New Roman'),
+        textfont=dict(size=28, color='#e94560', family='Aptos'),
         name='User Location',
         hovertemplate="<b>Your Location</b><br>Lat: %{lat:.2f}<br>Lon: %{lon:.2f}<extra></extra>"
     ))
@@ -1658,14 +1658,14 @@ def create_geographic_map(datacenters, user_location, distribution=None, title="
     )
     
     fig.update_layout(
-        title=dict(text=f"<b>{title}</b>", font=dict(size=48, family='Times New Roman', color='#000000')),
+        title=dict(text=f"<b>{title}</b>", font=dict(size=48, family='Aptos', color='#000000')),
         height=900,
         autosize=True,
         margin=dict(l=0, r=0, t=120, b=0),
         showlegend=True,
         legend=dict(x=0.01, y=0.99, bgcolor='rgba(255,255,255,0.95)',
                    bordercolor='#999', borderwidth=2,
-                   font=dict(size=28, family='Times New Roman', color='#000000')),
+                   font=dict(size=28, family='Aptos', color='#000000')),
         paper_bgcolor='white'
     )
     
@@ -1707,26 +1707,26 @@ def create_traffic_distribution_chart(results, title="Traffic Distribution by St
             marker_color=climate_colors.get(climate, '#6b7280'),
             text=[f"<b>{v:,}</b>" for v in values],
             textposition='outside',
-            textfont=dict(size=28, color='#000000', family='Times New Roman'),
+            textfont=dict(size=28, color='#000000', family='Aptos'),
             cliponaxis=False,
             hovertemplate=f"<b>{short_name}</b><br>%{{x}}: %{{y:,}} requests<extra></extra>"
         ))
 
 
     fig.update_layout(
-        title=dict(text=f"<b>{title}</b>", font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Number of Requests</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+        title=dict(text=f"<b>{title}</b>", font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Number of Requests</b>", font=dict(size=36, family='Aptos', color='#000000')),
         barmode='group',
         bargap=0.25,
         bargroupgap=0.1,
         height=900,
         margin=dict(l=100, r=60, t=120, b=180),
         legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
-                   font=dict(size=32, family='Times New Roman', color='#000000')),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+                   font=dict(size=32, family='Aptos', color='#000000')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
         uniformtext_minsize=28,
         uniformtext_mode='hide',
         plot_bgcolor='white',
@@ -1763,24 +1763,24 @@ def create_model_comparison_chart(model_metrics):
             marker_color=colors[i],
             text=[f"<b>{v:.4f}</b>" for v in values],
             textposition='auto',
-            textfont=dict(size=28, color='#000000', family='Times New Roman'),
+            textfont=dict(size=28, color='#000000', family='Aptos'),
             showlegend=False
         ), row=1, col=i+1)
 
     fig.update_layout(
         title=dict(text="<b>AI Model Performance Comparison</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
         height=900,
         margin=dict(l=100, r=60, t=120, b=100),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
+        font=dict(family='Aptos', size=28, color='#000000'),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
 
     # Update subplot titles and axis labels with larger fonts
-    fig.update_annotations(font=dict(size=36, family='Times New Roman', color='#000000'))
-    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
-    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
+    fig.update_annotations(font=dict(size=36, family='Aptos', color='#000000'))
+    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Aptos'))
+    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Aptos'))
     
     return fig
 
@@ -1847,14 +1847,14 @@ def create_prediction_scatter(model_metrics, model_name='ANN'):
     
     fig.update_layout(
         title=dict(text=f"<b>{model_name}: Predicted vs Actual (R² = {r2:.4f}){sample_note}</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Actual Energy (Wh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Predicted Energy (Wh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Actual Energy (Wh)</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Predicted Energy (Wh)</b>", font=dict(size=36, family='Aptos', color='#000000')),
         height=700,
         width=700,
         margin=dict(l=120, r=140, t=100, b=100),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white',
         # Force 1:1 aspect ratio for scatter plots
@@ -1862,17 +1862,17 @@ def create_prediction_scatter(model_metrics, model_name='ANN'):
             scaleanchor='y',
             scaleratio=1,
             constrain='domain',
-            tickfont=dict(size=32, color='#000000', family='Times New Roman')
+            tickfont=dict(size=32, color='#000000', family='Aptos')
         ),
         yaxis=dict(
             constrain='domain',
-            tickfont=dict(size=32, color='#000000', family='Times New Roman')
+            tickfont=dict(size=32, color='#000000', family='Aptos')
         )
     )
 
     # Update colorbar title font
-    fig.update_coloraxes(colorbar=dict(title=dict(text='<b>Residual</b>', font=dict(size=32, color='#000000', family='Times New Roman')),
-                                       tickfont=dict(size=28, color='#000000', family='Times New Roman')))
+    fig.update_coloraxes(colorbar=dict(title=dict(text='<b>Residual</b>', font=dict(size=32, color='#000000', family='Aptos')),
+                                       tickfont=dict(size=28, color='#000000', family='Aptos')))
     
     return fig
 
@@ -1938,21 +1938,21 @@ def create_feature_importance_chart(feature_importance, model_name='MLR'):
         marker_color=colors[:len(features)],
         text=[f"<b>{p:.1f}%</b>" for p in percentages],
         textposition='outside',
-        textfont=dict(size=32, family='Times New Roman', color='#000000')
+        textfont=dict(size=32, family='Aptos', color='#000000')
     ))
 
     fig.update_layout(
         title=dict(text="<b>Feature Importance for Energy Prediction</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Relative Importance (%)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Relative Importance (%)</b>", font=dict(size=36, family='Aptos', color='#000000')),
         height=800,
         width=900,
         margin=dict(l=220, r=120, t=100, b=100),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        yaxis=dict(autorange='reversed', tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        yaxis=dict(autorange='reversed', tickfont=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white',
-        xaxis=dict(range=[0, max(percentages) * 1.15], tickfont=dict(size=32, color='#000000', family='Times New Roman'))
+        xaxis=dict(range=[0, max(percentages) * 1.15], tickfont=dict(size=32, color='#000000', family='Aptos'))
     )
     
     return fig
@@ -1988,17 +1988,17 @@ def create_metrics_comparison_chart(results):
     
     fig.update_layout(
         title=dict(text="<b>Performance Metrics by Strategy</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Metric Value</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Metric Value</b>", font=dict(size=36, family='Aptos', color='#000000')),
         barmode='group',
         height=900,
         margin=dict(l=100, r=60, t=120, b=200),
         legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
-                   font=dict(size=32, family='Times New Roman', color='#000000')),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+                   font=dict(size=32, family='Aptos', color='#000000')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
@@ -2036,17 +2036,17 @@ def create_bayesopt_convergence_chart(model_results):
 
         fig.update_layout(
             title=dict(text="<b>Bayesian Optimization Convergence (Validation R²)</b>",
-                      font=dict(size=48, family='Times New Roman', color='#000000')),
-            xaxis_title=dict(text="<b>Iteration</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-            yaxis_title=dict(text="<b>Validation R²</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                      font=dict(size=48, family='Aptos', color='#000000')),
+            xaxis_title=dict(text="<b>Iteration</b>", font=dict(size=36, family='Aptos', color='#000000')),
+            yaxis_title=dict(text="<b>Validation R²</b>", font=dict(size=36, family='Aptos', color='#000000')),
             height=600,
             margin=dict(l=100, r=60, t=120, b=140),
             plot_bgcolor="white",
             paper_bgcolor="white",
-            font=dict(family="Times New Roman", size=28, color='#000000'),
-            xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-            yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-            legend=dict(y=-0.3, x=0.5, xanchor='center', orientation='h', font=dict(size=32, color='#000000', family='Times New Roman'))
+            font=dict(family="Aptos", size=28, color='#000000'),
+            xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+            yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+            legend=dict(y=-0.3, x=0.5, xanchor='center', orientation='h', font=dict(size=32, color='#000000', family='Aptos'))
         )
         return fig
     except Exception:
@@ -2110,30 +2110,30 @@ def create_learning_curve_chart(model_results):
                 row=2, col=1
             )
 
-    fig.update_yaxes(title_text="<b>Loss</b>", title_font=dict(size=36, color='#000000', family='Times New Roman'),
-                     tickfont=dict(size=32, color='#000000', family='Times New Roman'), row=1, col=1)
+    fig.update_yaxes(title_text="<b>Loss</b>", title_font=dict(size=36, color='#000000', family='Aptos'),
+                     tickfont=dict(size=32, color='#000000', family='Aptos'), row=1, col=1)
     if has_val:
-        fig.update_yaxes(title_text="<b>R²</b>", title_font=dict(size=36, color='#000000', family='Times New Roman'),
-                        tickfont=dict(size=32, color='#000000', family='Times New Roman'), row=2, col=1)
+        fig.update_yaxes(title_text="<b>R²</b>", title_font=dict(size=36, color='#000000', family='Aptos'),
+                        tickfont=dict(size=32, color='#000000', family='Aptos'), row=2, col=1)
 
-    fig.update_xaxes(title_text="<b>Epoch</b>", title_font=dict(size=36, color='#000000', family='Times New Roman'),
-                     tickfont=dict(size=32, color='#000000', family='Times New Roman'), row=rows, col=1)
+    fig.update_xaxes(title_text="<b>Epoch</b>", title_font=dict(size=36, color='#000000', family='Aptos'),
+                     tickfont=dict(size=32, color='#000000', family='Aptos'), row=rows, col=1)
 
     fig.update_layout(
         title=dict(text="<b>ANN Training Convergence</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
         height=1200 if has_val else 700,
         margin=dict(l=130, r=80, t=140, b=180),
         hovermode='x unified',
         plot_bgcolor='white',
         paper_bgcolor='white',
-        font=dict(family='Times New Roman', size=28, color='#000000'),
+        font=dict(family='Aptos', size=28, color='#000000'),
         legend=dict(orientation='h', y=-0.22, x=0.5, xanchor='center',
-                   font=dict(size=32, color='#000000', family='Times New Roman'))
+                   font=dict(size=32, color='#000000', family='Aptos'))
     )
 
     # Update subplot titles with larger fonts
-    fig.update_annotations(font=dict(size=36, family='Times New Roman', color='#000000'))
+    fig.update_annotations(font=dict(size=36, family='Aptos', color='#000000'))
 
     return fig
 
@@ -2166,22 +2166,22 @@ def create_heat_distribution_chart(results):
             marker_color=climate_colors.get(climate, '#6b7280'),
             text=[f"<b>{v:,.0f}</b>" for v in values],
             textposition='auto',
-            textfont=dict(size=28, color='#000000', family='Times New Roman')
+            textfont=dict(size=28, color='#000000', family='Aptos')
         ))
 
     fig.update_layout(
         title=dict(text="<b>Heat Distribution by Datacenter (Wh)</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Heat Dissipation (Wh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Routing Strategy</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Heat Dissipation (Wh)</b>", font=dict(size=36, family='Aptos', color='#000000')),
         barmode='stack',
         height=900,
         margin=dict(l=100, r=60, t=120, b=200),
         legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
-                   font=dict(size=32, family='Times New Roman', color='#000000')),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+                   font=dict(size=32, family='Aptos', color='#000000')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
@@ -2230,21 +2230,21 @@ def create_monte_carlo_boxplots(mc_results):
     
     fig.update_layout(
         title=dict(text="<b>Monte Carlo Results: distribution across runs</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
         height=1400,
         margin=dict(l=120, r=80, t=140, b=220),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
+        font=dict(family='Aptos', size=28, color='#000000'),
         showlegend=True,
         legend=dict(orientation='h', y=-0.20, x=0.5, xanchor='center',
-                   font=dict(size=32, color='#000000', family='Times New Roman')),
+                   font=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
 
     # Update subplot titles and axis labels with larger fonts
-    fig.update_annotations(font=dict(size=36, family='Times New Roman', color='#000000'))
-    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
-    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
+    fig.update_annotations(font=dict(size=36, family='Aptos', color='#000000'))
+    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Aptos'))
+    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Aptos'))
     
     return fig
 
@@ -2302,18 +2302,18 @@ def create_monte_carlo_mean_ci_chart(mc_results):
 
     fig.update_layout(
         title=dict(text="<b>Monte Carlo: Mean ± 95% CI of the Mean</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
         height=1400,
         margin=dict(l=120, r=80, t=140, b=160),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
+        font=dict(family='Aptos', size=28, color='#000000'),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
 
     # Update subplot titles and axis labels with larger fonts
-    fig.update_annotations(font=dict(size=36, family='Times New Roman', color='#000000'))
-    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
-    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Times New Roman'))
+    fig.update_annotations(font=dict(size=36, family='Aptos', color='#000000'))
+    fig.update_xaxes(tickfont=dict(size=32, color='#000000', family='Aptos'))
+    fig.update_yaxes(tickfont=dict(size=32, color='#000000', family='Aptos'))
     return fig
 
 
@@ -2346,18 +2346,18 @@ def create_monte_carlo_hist_overlay(mc_results, metric="peak_ΔT", title=None, x
     fig.update_layout(
         barmode='overlay',
         title=dict(text=title or f"Monte Carlo Distribution Overlay: {metric}",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text=x_label or metric, font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Density</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text=x_label or metric, font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Density</b>", font=dict(size=36, family='Aptos', color='#000000')),
         height=650,
         margin=dict(l=110, r=60, t=120, b=140),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white',
         legend=dict(orientation='h', y=-0.3, x=0.5, xanchor='center',
-                   font=dict(size=32, color='#000000', family='Times New Roman'))
+                   font=dict(size=32, color='#000000', family='Aptos'))
     )
     return fig
 
@@ -2388,18 +2388,18 @@ def create_monte_carlo_running_mean_chart(mc_results, metric="peak_ΔT", title=N
 
     fig.update_layout(
         title=dict(text=title or f"Monte Carlo Convergence: Running Mean of {metric}",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Monte Carlo run index</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text=y_label or metric, font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Monte Carlo run index</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text=y_label or metric, font=dict(size=36, family='Aptos', color='#000000')),
         height=650,
         margin=dict(l=110, r=60, t=120, b=140),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white',
         legend=dict(orientation='h', y=-0.3, x=0.5, xanchor='center',
-                   font=dict(size=32, color='#000000', family='Times New Roman'))
+                   font=dict(size=32, color='#000000', family='Aptos'))
     )
     return fig
 
@@ -2431,15 +2431,15 @@ def create_sensitivity_temperature_chart(sensitivity_data):
     
     fig.update_layout(
         title=dict(text="<b>Temperature Sensitivity Analysis</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Ambient Temperature (°C)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Peak ΔT-AR (°C)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Ambient Temperature (°C)</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Peak ΔT-AR (°C)</b>", font=dict(size=36, family='Aptos', color='#000000')),
         height=800,
         margin=dict(l=110, r=60, t=120, b=100),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
@@ -2500,15 +2500,15 @@ def create_carbon_intensity_curves(datacenters=None):
     
     fig.update_layout(
         title=dict(text="<b>24-Hour Carbon Intensity Patterns</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Local hour of day at each site</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Carbon Intensity (kg CO₂/kWh)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Local hour of day at each site</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Carbon Intensity (kg CO₂/kWh)</b>", font=dict(size=36, family='Aptos', color='#000000')),
         height=800,
         margin=dict(l=110, r=60, t=120, b=100),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Times New Roman')),
-        xaxis=dict(tickmode='linear', tick0=0, dtick=4, tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        legend=dict(x=0.02, y=0.98, font=dict(size=32, color='#000000', family='Aptos')),
+        xaxis=dict(tickmode='linear', tick0=0, dtick=4, tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
@@ -2543,20 +2543,20 @@ def create_cooling_effectiveness_heatmap():
         colorscale=colorscale,
         text=[['✗' if v < 0.4 else '○' if v < 0.8 else '✓' for v in row] for row in effectiveness],
         texttemplate="%{text}",
-        textfont=dict(size=36, color='#000000', family='Times New Roman'),
+        textfont=dict(size=36, color='#000000', family='Aptos'),
         hovertemplate="Cooling: %{y}<br>Climate: %{x}<br>Effectiveness: %{z:.0%}<extra></extra>"
     ))
 
     fig.update_layout(
         title=dict(text="<b>Cooling Effectiveness by Climate Type</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Climate Type</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Cooling Technology</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Climate Type</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Cooling Technology</b>", font=dict(size=36, family='Aptos', color='#000000')),
         height=800,
         margin=dict(l=240, r=80, t=120, b=100),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
@@ -2588,19 +2588,19 @@ def create_pue_comparison_chart():
         marker_color=colors,
         text=[f"<b>PUE: {p:.2f}</b>" for p in pues],
         textposition='outside',
-        textfont=dict(size=32, family='Times New Roman', color='#000000')
+        textfont=dict(size=32, family='Aptos', color='#000000')
     ))
 
     fig.update_layout(
         title=dict(text="<b>Power Usage Effectiveness (PUE) by Cooling Technology</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>PUE Value (lower is better)</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>PUE Value (lower is better)</b>", font=dict(size=36, family='Aptos', color='#000000')),
         height=800,
         width=900,
         margin=dict(l=280, r=140, t=120, b=100),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        xaxis=dict(range=[1.0, 2.2], tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        xaxis=dict(range=[1.0, 2.2], tickfont=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
@@ -2637,17 +2637,17 @@ def create_scenario_comparison_chart(scenario_a, scenario_b, scenario_a_name, sc
     
     fig.update_layout(
         title=dict(text="<b>Scenario Comparison</b>",
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis_title=dict(text="<b>Metrics</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
-        yaxis_title=dict(text="<b>Value</b>", font=dict(size=36, family='Times New Roman', color='#000000')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis_title=dict(text="<b>Metrics</b>", font=dict(size=36, family='Aptos', color='#000000')),
+        yaxis_title=dict(text="<b>Value</b>", font=dict(size=36, family='Aptos', color='#000000')),
         barmode='group',
         height=900,
         margin=dict(l=100, r=60, t=120, b=180),
-        font=dict(family='Times New Roman', size=28, color='#000000'),
-        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+        font=dict(family='Aptos', size=28, color='#000000'),
+        xaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(tickfont=dict(size=32, color='#000000', family='Aptos')),
         legend=dict(orientation='h', y=-0.25, x=0.5, xanchor='center',
-                   font=dict(size=32, color='#000000', family='Times New Roman')),
+                   font=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white'
     )
@@ -2685,7 +2685,7 @@ def create_train_val_test_comparison(model_results):
         marker_color='#3b82f6',
         text=[f"<b>{v:.4f}</b>" for v in train_r2],
         textposition='outside',
-        textfont=dict(size=28, family='Times New Roman', color='#000000')
+        textfont=dict(size=28, family='Aptos', color='#000000')
     ))
 
     fig.add_trace(go.Bar(
@@ -2696,7 +2696,7 @@ def create_train_val_test_comparison(model_results):
         marker_color='#10b981',
         text=[f"<b>{v:.4f}</b>" for v in val_r2],
         textposition='outside',
-        textfont=dict(size=28, family='Times New Roman', color='#000000')
+        textfont=dict(size=28, family='Aptos', color='#000000')
     ))
 
     fig.add_trace(go.Bar(
@@ -2707,26 +2707,26 @@ def create_train_val_test_comparison(model_results):
         marker_color='#f59e0b',
         text=[f"<b>{v:.4f}</b>" for v in test_r2],
         textposition='outside',
-        textfont=dict(size=28, family='Times New Roman', color='#000000')
+        textfont=dict(size=28, family='Aptos', color='#000000')
     ))
 
     fig.update_layout(
         title=dict(text='Model Performance: Train vs Validation vs Test',
-                  font=dict(size=48, family='Times New Roman', color='#000000')),
-        xaxis=dict(title=dict(text='R² Score', font=dict(size=36, family='Times New Roman', color='#000000')),
-                  range=[0, 1.08], tickfont=dict(size=32, color='#000000', family='Times New Roman')),
-        yaxis=dict(title=dict(text='Model', font=dict(size=36, family='Times New Roman', color='#000000')),
-                  tickfont=dict(size=32, color='#000000', family='Times New Roman')),
+                  font=dict(size=48, family='Aptos', color='#000000')),
+        xaxis=dict(title=dict(text='R² Score', font=dict(size=36, family='Aptos', color='#000000')),
+                  range=[0, 1.08], tickfont=dict(size=32, color='#000000', family='Aptos')),
+        yaxis=dict(title=dict(text='Model', font=dict(size=36, family='Aptos', color='#000000')),
+                  tickfont=dict(size=32, color='#000000', family='Aptos')),
         barmode='group',
         height=600,
         width=1000,
         margin=dict(l=120, r=180, t=120, b=180),
         showlegend=True,
         legend=dict(orientation='h', y=-0.35, x=0.5, xanchor='center',
-                   font=dict(size=32, color='#000000', family='Times New Roman')),
+                   font=dict(size=32, color='#000000', family='Aptos')),
         plot_bgcolor='white',
         paper_bgcolor='white',
-        font=dict(family='Times New Roman', size=28, color='#000000')
+        font=dict(family='Aptos', size=28, color='#000000')
     )
 
     return fig

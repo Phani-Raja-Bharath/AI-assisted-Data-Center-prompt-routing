@@ -11,8 +11,9 @@ toolbarMode = "viewer"
 base = "dark"
 # Shared by light and dark. Per-mode colors live in [theme.light] / [theme.dark];
 # keep them in sync with the light-dark() colors in dashboard_ui.py (render_dashboard).
-font = "Aptos, Calibri, sans-serif"
-headingFont = "Aptos Display, Aptos, Calibri, sans-serif"
+font = "Aptos, sans-serif"
+headingFont = "Aptos, sans-serif"
+codeFont = "Aptos, sans-serif"
 baseFontSize = 15
 headingFontSizes = ["30px", "25px", "20px", "18px", "16px", "14px"]
 headingFontWeights = [600, 600, 600, 600, 600, 600]
@@ -65,13 +66,3 @@ weight = 400
 family = "Aptos"
 url = "app/static/fonts/Aptos-Bold.ttf"
 weight = 700
-
-[[theme.fontFaces]]
-family = "Aptos Display"
-url = "app/static/fonts/AptosDisplay-Regular.ttf"
-weight = 400
-
-[[theme.fontFaces]]
-family = "Aptos Display"
-url = "app/static/fonts/AptosDisplay-Bold.ttf"
-weight = 600
